@@ -3,7 +3,11 @@ services:
     build: .
     container_name: yyb-go
     ports:
-      - "8000:8000"
+      - "${YYB_PORT:-8000}:${YYB_PORT:-8000}"
+    environment:
+      - YYB_USERNAME=${YYB_USERNAME:-}
+      - YYB_PASSWORD=${YYB_PASSWORD:-}
+      - YYB_PORT=${YYB_PORT:-8000}
     volumes:
       - yyb-data:/app/resource/db
     restart: unless-stopped

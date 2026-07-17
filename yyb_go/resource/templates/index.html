@@ -271,6 +271,41 @@
       font-weight: 760;
     }
 
+    .dash-cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 12px;
+    }
+
+    .dash-card {
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      display: grid;
+      gap: 4px;
+    }
+
+    .dash-card .label {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .dash-card .value {
+      font-size: 28px;
+      font-weight: 800;
+      line-height: 1;
+    }
+
+    .dash-card.alive .value { color: var(--success); }
+    .dash-card.expired .value { color: var(--danger); }
+    .dash-card.proxy .value { color: var(--accent); }
+
+    .last-refresh {
+      font-size: 11px;
+      color: var(--faint);
+    }
+
     .quick-actions {
       min-width: 260px;
       background: var(--ink);
@@ -684,6 +719,14 @@
           </div>
         </aside>
       </section>
+
+      <section class="dash-cards" id="dashCards" aria-label="仪表盘">
+        <div class="dash-card"><span class="label">账号总数</span><span class="value" id="dashTotal">-</span></div>
+        <div class="dash-card alive"><span class="label">在线</span><span class="value" id="dashAlive">-</span></div>
+        <div class="dash-card expired"><span class="label">离线/过期</span><span class="value" id="dashExpired">-</span></div>
+        <div class="dash-card proxy"><span class="label">代理绑定</span><span class="value" id="dashProxy">-</span></div>
+      </section>
+      <div style="text-align:right;margin-bottom:4px"><span class="last-refresh" id="lastRefreshLabel"></span></div>
 
       <section class="account-band" aria-label="账号队列">
         <div class="section-head">
@@ -1116,7 +1159,25 @@
     loadHealth();
     loadFeatures();
     loadAccounts();
+    loadDashboard();
     setInterval(loadHealth, 15000);
+    setInterval(loadDashboard, 10000);
+
+    async function loadDashboard() {
+      try {
+        const r = await fetch("/api/dashboard");
+        if (!r.ok) return;
+        const d = await r.json();
+        const s = d.data?.summary || {};
+        $("dashTotal").textContent = s.total ?? "-";
+        $("dashAlive").textContent = s.alive ?? "-";
+        $("dashExpired").textContent = s.expired ?? "-";
+        $("dashProxy").textContent = s.with_proxy ?? "-";
+        const now = new Date();
+        $("lastRefreshLabel").textContent =
+          "刷新 " + now.toLocaleTimeString("zh-CN", { hour12: false });
+      } catch (_) {}
+    }
   </script>
 </body>
 </html>

@@ -16,5 +16,8 @@ WORKDIR /app
 COPY --from=builder /yyb-go .
 COPY resource/ ./resource/
 
+COPY entrypoint.sh /
+RUN chmod +x /entrypoint.sh
+
 EXPOSE 8000
-ENTRYPOINT ["./yyb-go", "--host", "0.0.0.0", "--port", "8000", "--resource-root", "./resource"]
+ENTRYPOINT ["/entrypoint.sh"]

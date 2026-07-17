@@ -9,15 +9,26 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
 	"yyb_go/internal/httpapi"
 )
 
+func envInt(key string, defaultVal int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return defaultVal
+}
+
 func main() {
+	defaultPort := envInt("YYB_PORT", 8000)
 	host := flag.String("host", "127.0.0.1", "listen host")
-	port := flag.Int("port", 8000, "listen port")
+	port := flag.Int("port", defaultPort, "listen port")
 	resourceRoot := flag.String("resource-root", filepath.Join(".", "resource"), "runtime resource directory")
 	dbFilename := flag.String("db", httpapi.DefaultDBFilename, "SQLite database filename under resource/db")
 	tcpProxy := flag.String("tcp-proxy", "", "optional TCP proxy: socks5://host:port or http-connect://host:port")

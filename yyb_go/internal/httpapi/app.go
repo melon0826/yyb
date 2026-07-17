@@ -112,6 +112,9 @@ func (a *App) Handler() http.Handler {
 	router := gin.New()
 	router.Use(gin.Logger(), gin.Recovery())
 
+	guard := newAuthGuard()
+	router.Use(guard.middleware())
+
 	router.Any("/", gin.WrapF(a.handleIndex))
 	router.Any("/scan", gin.WrapF(a.handleScan))
 	router.Any("/docs", func(c *gin.Context) {
@@ -122,6 +125,7 @@ func (a *App) Handler() http.Handler {
 	router.Any("/health", func(c *gin.Context) {
 		writeJSON(c.Writer, http.StatusOK, gin.H{"ok": true})
 	})
+	router.Any("/api/dashboard", gin.WrapF(a.handleDashboard))
 	router.StaticFS("/static", http.Dir(a.resources.Static))
 	router.Any("/qr", gin.WrapF(a.handleQRRoot))
 	router.Any("/qr/*path", gin.WrapF(a.handleQR))
@@ -488,6 +492,64 @@ func (a *App) handleWxCodeCompat(w http.ResponseWriter, r *http.Request) {
 	}
 	// 兼容旧格式: { code:0, data:{ code:"xxx" } }
 	writeJSON(w, http.StatusOK, map[string]any{"code": result["code"]})
+}
+
+// handleDashboard 返回账号概览
+func (a *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	accs, err := a.db.ListAccounts(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "list accounts: "+err.Error())
+		return
+	}
+	total := len(accs)
+	alive := 0
+	expired := 0
+	withProxy := 0
+	items := make([]map[string]any, 0, total)
+	for _, acc := range accs {
+		status := "unknown"
+		if acc.Status != nil {
+			status = *acc.Status
+		}
+		if status == "alive" {
+			alive++
+		} else {
+			expired++
+		}
+		if acc.BoundProxy != "" {
+			withProxy++
+		}
+		item := map[string]any{
+			"id":           acc.ID,
+			"openid":       acc.OpenID,
+			"status":       status,
+			"bound_proxy":  acc.BoundProxy,
+			"last_checked": "",
+		}
+		if acc.Nickname != nil {
+			item["nickname"] = *acc.Nickname
+		}
+		if acc.Avatar != nil {
+			item["avatar"] = *acc.Avatar
+		}
+		if acc.LastCheckedAt != nil {
+			item["last_checked"] = time.Unix(*acc.LastCheckedAt, 0).Format("2006-01-02 15:04:05")
+		}
+		items = append(items, item)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"summary": map[string]any{
+			"total":      total,
+			"alive":      alive,
+			"expired":    expired,
+			"with_proxy": withProxy,
+		},
+		"accounts": items,
+	})
 }
 
 func (a *App) handleGetPhoneNumber(w http.ResponseWriter, r *http.Request) {
