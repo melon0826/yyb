@@ -1,0 +1,265 @@
+# YYB Go AI 接手提示词
+
+## 使用说明
+
+这是一份给其他 AI 或协作开发者使用的提示词模板。
+
+目标有两个：
+
+1. 让 AI 快速理解 YYB Go 项目。
+2. 让 AI 在现有代码结构上继续开发“单独 IP + 账户绑定登录状态”能力。
+
+使用方式：
+
+- 直接把下面“完整提示词”整体喂给 AI。
+- 如果对方 AI 支持附加上下文，再把 `当前工作区/.monkeycode/docs/` 下的文档一并提供。
+
+## 完整提示词
+
+```text
+你现在接手的是一个已经完成初步分析的 Go 项目，请先完整理解项目，再继续做功能扩展。
+
+一、你的任务目标
+
+你需要完成两件事：
+
+1. 快速接手并理解 YYB Go 项目。
+2. 在现有架构上设计并实现“单独 IP + 账户绑定登录状态”的扩展能力。
+
+二、项目背景
+
+这个项目名为 YYB Go，本质上是一个 Go 单体 Web 服务，用于：
+
+1. 通过微信扫码接入账号。
+2. 在服务端保存登录凭据和 `login_buffer`。
+3. 建立并复用协议会话。
+4. 通过控制台页面和 HTTP API 代调用 wxapp 能力。
+
+当前项目已经具备：
+
+1. 扫码接入账号。
+2. 保存账号凭据与 `login_buffer`。
+3. 建立协议会话并缓存。
+4. 基于会话调用 wxapp 相关接口。
+5. 基础控制台页面。
+
+当前项目还没有：
+
+1. 后台鉴权。
+2. 账号权限体系。
+3. 来源 IP 控制。
+4. 账号级代理配置。
+5. 审计日志。
+
+三、你必须先接受的事实
+
+以下结论已经基于源码确认，你要以这些结论为前提开展工作：
+
+1. 当前源码的真实来源是压缩包解压后的项目，之前分析使用的源码路径在临时目录中。
+2. 项目入口是 `cmd/yyb-go/main.go`。
+3. HTTP 层核心在 `internal/httpapi/`。
+4. 扫码登录核心在 `internal/qr/`。
+5. 协议会话与代理拨号核心在 `internal/protocol/`。
+6. SQLite 存储核心在 `internal/store/`。
+7. 当前全局支持 `--tcp-proxy`，说明协议层已经支持代理出口。
+8. `sessions` 表当前按 `(wechat_account_id, tcp_proxy)` 做会话隔离。
+9. 当前系统里没有账号级来源 IP 白名单实现。
+10. 当前系统里没有后台登录鉴权实现。
+
+四、你要先阅读的文档
+
+请按顺序阅读下面这些文档，再开始动代码：
+
+1. `.monkeycode/docs/INDEX.md`
+2. `.monkeycode/docs/PROJECT_OVERVIEW.md`
+3. `.monkeycode/docs/ARCHITECTURE.md`
+4. `.monkeycode/docs/API_SUMMARY.md`
+5. `.monkeycode/docs/LOGIN_AND_SESSION.md`
+6. `.monkeycode/docs/EXTENSION_PROPOSAL.md`
+
+五、你要重点阅读的源码文件
+
+请优先阅读这些文件：
+
+1. `cmd/yyb-go/main.go`
+2. `internal/httpapi/app.go`
+3. `internal/httpapi/openapi.go`
+4. `internal/qr/qr.go`
+5. `internal/protocol/pool.go`
+6. `internal/protocol/transport.go`
+7. `internal/protocol/loginbuffer.go`
+8. `internal/protocol/ilink.go`
+9. `internal/store/store.go`
+10. `resource/templates/index.html`
+11. `resource/templates/scan.html`
+
+六、目标需求解释
+
+“单独 IP + 账户绑定登录状态”在这个项目里，优先按下面定义理解：
+
+1. 每个账号可以绑定自己的代理出口配置。
+2. 同一个账号在不同代理出口下，登录状态和协议会话要彼此隔离。
+3. 后续对该账号的调用，默认使用这个账号绑定的代理出口。
+4. 账号登录态、会话缓存、会话恢复逻辑要与账号绑定代理保持一致。
+
+这项需求优先表示的是：
+
+1. 指定账户走指定出口 IP。
+2. 账户级会话和代理配置形成稳定绑定。
+
+如需继续增强，可以再追加“指定账户只能由指定来源 IP 操作”，但这是第二阶段需求。
+
+七、你要遵守的实现原则
+
+1. 先复用现有结构，再做最小改造。
+2. 以 `tcp_proxy` 现有能力为基础扩展账号级代理字段。
+3. 保持 `sessions` 表的代理隔离思路。
+4. 优先在 `store`、`httpapi`、`protocol` 三层做闭环改造。
+5. 不要臆造现有系统已经具备的安全能力。
+6. 不要把“来源 IP 控制”和“出口 IP 绑定”混成一个需求。
+7. 任何结论都要以现有源码为准。
+
+八、推荐实现方向
+
+请优先按以下方向推进：
+
+1. 给 `wechat_accounts` 增加账号级代理配置字段。
+2. 在账号新增、更新、读取接口中暴露该配置。
+3. 在 wxapp 调用入口统一解析“本次账号有效代理”。
+4. 在协议会话获取与新建逻辑中使用账号级代理。
+5. 继续沿用 `(wechat_account_id, tcp_proxy)` 作为会话缓存隔离维度。
+6. 在页面中增加账号代理配置入口和状态展示。
+
+建议新增或调整的数据字段包括：
+
+1. `bound_proxy`：账号绑定代理，例如 `socks5://host:port` 或 `http-connect://host:port`
+2. 可选的 `allowed_source_ips`：用于第二阶段来源 IP 控制
+
+九、你应当先产出的内容
+
+动手写代码前，先输出一份简短的技术方案，至少回答这些问题：
+
+1. 要改哪些表结构。
+2. 要改哪些 HTTP 接口。
+3. 要改哪些协议层函数。
+4. 会话缓存键是否继续复用现有 `(wechat_account_id, tcp_proxy)`。
+5. 扫码接入后如何保存账号级代理配置。
+6. 页面上如何配置和展示该字段。
+7. 如何验证同一账号在不同代理下会话隔离生效。
+
+十、你应当完成的开发任务
+
+请按这个顺序推进：
+
+1. 梳理现有数据结构与会话流。
+2. 设计账号级代理字段与兼容策略。
+3. 修改数据库初始化和读写逻辑。
+4. 修改账号管理接口。
+5. 修改协议层代理解析逻辑。
+6. 修改页面表单与展示。
+7. 补充测试或最小验证步骤。
+8. 输出改动说明与后续风险。
+
+十一、你要重点验证的行为
+
+请验证以下行为是否成立：
+
+1. 未配置账号代理时，系统仍能沿用原有全局 `tcp_proxy` 或默认直连行为。
+2. 配置账号代理后，该账号调用优先使用账号绑定代理。
+3. 同一账号切换不同代理后，会命中不同的会话缓存。
+4. 同一账号旧代理下的会话不会误复用到新代理。
+5. 页面展示的账号代理配置与后端实际生效值一致。
+
+十二、你要避免的误区
+
+1. 不要把“绑定出口 IP”理解成应用层直接创造公网 IP。
+2. 不要把“来源 IP 白名单”当成当前需求的主体。
+3. 不要直接重写整套协议层。
+4. 不要脱离现有 SQLite 和单体结构做过重设计。
+5. 不要跳过源码阅读直接下结论。
+
+十三、建议启动与验证方式
+
+项目可使用以下命令验证：
+
+1. `go test ./...`
+2. `go run ./cmd/yyb-go --host 0.0.0.0 --port 8000`
+
+默认资源目录依赖项目根下 `resource/`，运行时保持工作目录在项目根路径。
+
+十四、你最终输出给我的内容格式
+
+请按下面顺序输出：
+
+1. 项目理解摘要。
+2. 现状与限制。
+3. 改造方案。
+4. 具体修改点。
+5. 验证方法。
+6. 风险与后续建议。
+
+在完成分析后，再开始代码实现。
+```
+
+## 精简版提示词
+
+如果你只想快速把项目交给另一个 AI，可以直接使用下面这版：
+
+```text
+请接手 YYB Go 项目，并完成“单独 IP + 账户绑定登录状态”扩展。
+
+先阅读：
+1. `.monkeycode/docs/INDEX.md`
+2. `.monkeycode/docs/PROJECT_OVERVIEW.md`
+3. `.monkeycode/docs/ARCHITECTURE.md`
+4. `.monkeycode/docs/API_SUMMARY.md`
+5. `.monkeycode/docs/LOGIN_AND_SESSION.md`
+6. `.monkeycode/docs/EXTENSION_PROPOSAL.md`
+
+再阅读源码：
+1. `cmd/yyb-go/main.go`
+2. `internal/httpapi/app.go`
+3. `internal/qr/qr.go`
+4. `internal/protocol/pool.go`
+5. `internal/protocol/transport.go`
+6. `internal/protocol/loginbuffer.go`
+7. `internal/store/store.go`
+8. `resource/templates/index.html`
+
+你需要以现有结论为前提：
+1. 这是一个 Go 单体 Web 服务。
+2. 当前支持微信扫码接入账号、保存 `login_buffer`、建立协议会话、代调用 wxapp。
+3. 当前只有全局 `--tcp-proxy`，没有账号级代理。
+4. `sessions` 表当前按 `(wechat_account_id, tcp_proxy)` 隔离会话。
+5. 当前没有后台鉴权和来源 IP 控制。
+
+你的开发目标是：
+1. 为每个账号增加绑定代理配置。
+2. 让同一账号在不同代理下的登录态和会话缓存隔离。
+3. 让账号调用默认走账号绑定代理。
+4. 保持最小改造，优先复用现有 `tcp_proxy` 机制。
+
+请先输出技术方案，再开始实现。方案中必须说明：
+1. 表结构修改。
+2. HTTP 接口修改。
+3. 协议层修改。
+4. 页面修改。
+5. 测试与验证方法。
+```
+
+## 推荐搭配材料
+
+如果你把这份提示词交给其他 AI，我建议同时附上：
+
+1. `当前工作区/.monkeycode/docs/` 全部文档
+2. 项目源码目录
+3. 启动命令：`go run ./cmd/yyb-go --host 0.0.0.0 --port 8000`
+4. 测试命令：`go test ./...`
+
+## 适用场景
+
+这份提示词适合：
+
+1. 把项目交给新的 AI 继续分析
+2. 让新的 AI 直接进入功能扩展阶段
+3. 让协作者先统一问题定义，再开始开发
