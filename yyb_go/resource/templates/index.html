@@ -423,6 +423,14 @@
       white-space: nowrap;
     }
 
+    .account-proxy {
+      color: var(--accent);
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     .empty-state {
       min-height: 100px;
       display: grid;
@@ -719,6 +727,13 @@
                 <label for="payloadInput">请求 JSON</label>
                 <textarea class="textarea" id="payloadInput" spellcheck="false">{"api_name":"getUserInfo","data":{},"env":1}</textarea>
               </div>
+              <div class="field">
+                <label for="proxyInput">账号代理 (选填)</label>
+                <div style="display:flex;gap:8px">
+                  <input class="input" id="proxyInput" placeholder="如 socks5://host:port 或留空使用全局代理" autocomplete="off" spellcheck="false" style="flex:1">
+                  <button class="btn secondary" id="setProxyBtn" type="button">保存代理</button>
+                </div>
+              </div>
             </div>
             <div class="inline-actions">
               <button class="btn primary" id="callBtn" type="button">执行调用</button>
@@ -862,6 +877,7 @@
       const label = selected ? accountName(selected) : "未选择";
       $("selectedAccountName").textContent = label;
       $("currentAccountText").textContent = label;
+      $("proxyInput").value = selected ? (selected.bound_proxy || "") : "";
       document.querySelectorAll(".account-card").forEach(card => {
         card.classList.toggle("selected", card.dataset.openid === state.selectedOpenID);
       });
@@ -904,6 +920,7 @@
             <span class="account-name">${escapeHTML(name)}</span>
             <span class="account-status ${cls}"><span class="status-dot"></span>${statusText(account.status)}</span>
             <span class="account-meta">uin: ${escapeHTML(account.uin ?? "-")} · ${formatChecked(account.last_checked_at)}</span>
+            <span class="account-proxy">${account.bound_proxy ? "代理: " + escapeHTML(account.bound_proxy) : ""}</span>
           </span>
         `;
         button.querySelector("img").addEventListener("error", event => {
@@ -1006,6 +1023,29 @@
       }
     }
 
+    async function setProxy() {
+      const account = selectedAccount();
+      if (!account) {
+        setResult("请先选择一个账号。", "缺少账号", true);
+        return;
+      }
+      const proxy = $("proxyInput").value.trim();
+      const button = $("setProxyBtn");
+      button.disabled = true;
+      button.textContent = "保存中";
+      try {
+        const result = await api("PUT", `/accounts/proxy?ref=${encodeURIComponent(account.openid)}`, { bound_proxy: proxy });
+        await loadAccounts();
+        setResult(result, "代理配置已更新", false);
+        setActivity(`已为 ${accountName(account)} 设置代理${proxy ? ": " + proxy : "(清除)"}`);
+      } catch (error) {
+        setResult(error.data || error.message, "代理配置失败", true);
+      } finally {
+        button.disabled = false;
+        button.textContent = "保存代理";
+      }
+    }
+
     async function callFeature() {
       const account = selectedAccount();
       if (!account) {
@@ -1062,6 +1102,7 @@
     $("resyncAllBtn").addEventListener("click", resyncAll);
     $("featureSel").addEventListener("change", togglePayload);
     $("callBtn").addEventListener("click", callFeature);
+    $("setProxyBtn").addEventListener("click", setProxy);
     $("clearResultBtn").addEventListener("click", () => setResult("结果已清空。", "等待调用", false));
     $("copyResultBtn").addEventListener("click", async () => {
       try {

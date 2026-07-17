@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS wechat_accounts (
     login_buffer    TEXT    NOT NULL,
     credentials     TEXT,
     status          TEXT,
+    bound_proxy     TEXT    NOT NULL DEFAULT '',
     last_checked_at INTEGER,
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL
@@ -74,6 +75,7 @@ type WechatAccount struct {
 	LoginBuffer   string         `json:"login_buffer,omitempty"`
 	Credentials   map[string]any `json:"credentials,omitempty"`
 	Status        *string        `json:"status,omitempty"`
+	BoundProxy    string         `json:"bound_proxy,omitempty"`
 	LastCheckedAt *int64         `json:"last_checked_at,omitempty"`
 	CreatedAt     int64          `json:"created_at"`
 	UpdatedAt     int64          `json:"updated_at"`
@@ -87,6 +89,7 @@ type AccountPublic struct {
 	Nickname      *string `json:"nickname"`
 	Avatar        *string `json:"avatar"`
 	Status        *string `json:"status"`
+	BoundProxy    string  `json:"bound_proxy"`
 	LastCheckedAt *int64  `json:"last_checked_at"`
 	CreatedAt     int64   `json:"created_at"`
 	UpdatedAt     int64   `json:"updated_at"`
@@ -315,6 +318,14 @@ func (db *DB) SetAccountStatus(ctx context.Context, id int64, status string) err
 	return err
 }
 
+func (db *DB) SetAccountBoundProxy(ctx context.Context, id int64, boundProxy string) error {
+	_, err := db.sql.ExecContext(ctx,
+		"UPDATE wechat_accounts SET bound_proxy=?, updated_at=? WHERE id=?",
+		boundProxy, time.Now().Unix(), id,
+	)
+	return err
+}
+
 func (db *DB) DeleteAccount(ctx context.Context, id int64) error {
 	_, err := db.sql.ExecContext(ctx, "DELETE FROM wechat_accounts WHERE id=?", id)
 	return err
@@ -425,13 +436,14 @@ func (a *WechatAccount) Public() AccountPublic {
 		Nickname:      a.Nickname,
 		Avatar:        a.Avatar,
 		Status:        a.Status,
+		BoundProxy:    a.BoundProxy,
 		LastCheckedAt: a.LastCheckedAt,
 		CreatedAt:     a.CreatedAt,
 		UpdatedAt:     a.UpdatedAt,
 	}
 }
 
-const selectAccountSQL = `SELECT id, openid, uin, alias, nickname, avatar, user_info, login_buffer, credentials, status, last_checked_at, created_at, updated_at FROM wechat_accounts`
+const selectAccountSQL = `SELECT id, openid, uin, alias, nickname, avatar, user_info, login_buffer, credentials, status, bound_proxy, last_checked_at, created_at, updated_at FROM wechat_accounts`
 
 type accountScanner interface {
 	Scan(dest ...any) error
@@ -455,7 +467,7 @@ func scanAccountRows(row accountScanner) (*WechatAccount, error) {
 	)
 	err := row.Scan(
 		&a.ID, &a.OpenID, &uin, &alias, &nickname, &avatar, &userJSON,
-		&a.LoginBuffer, &credJSON, &status, &lastChecked, &a.CreatedAt, &a.UpdatedAt,
+		&a.LoginBuffer, &credJSON, &status, &a.BoundProxy, &lastChecked, &a.CreatedAt, &a.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err

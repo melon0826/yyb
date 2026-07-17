@@ -129,9 +129,11 @@ func (a *App) Handler() http.Handler {
 	router.Any("/accounts/avatar", gin.WrapF(a.handleAccountAvatar))
 	router.Any("/accounts/refresh", gin.WrapF(a.handleAccountRefresh))
 	router.Any("/accounts/resync", gin.WrapF(a.handleAccountResync))
+	router.Any("/accounts/proxy", gin.WrapF(a.handleAccountProxy))
 	router.Any("/wxapp/getCode", gin.WrapF(a.handleGetCode))
 	router.Any("/wxapp/getPhoneNumber", gin.WrapF(a.handleGetPhoneNumber))
 	router.Any("/wxapp/operateWxData", gin.WrapF(a.handleOperateWXData))
+	router.Any("/wx/code", gin.WrapF(a.handleWxCodeCompat))
 	router.NoRoute(func(c *gin.Context) {
 		writeError(c.Writer, http.StatusNotFound, "not found")
 	})
@@ -393,11 +395,99 @@ func (a *App) handleAccountResync(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, updated.Public())
 }
 
+func (a *App) handleAccountProxy(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/accounts/proxy" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	switch r.Method {
+	case http.MethodPut:
+		acc, ok := a.resolveAccountFromQuery(w, r)
+		if !ok {
+			return
+		}
+		var body struct {
+			BoundProxy string `json:"bound_proxy"`
+		}
+		if err := decodeOptionalJSON(r, &body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		if err := a.db.SetAccountBoundProxy(r.Context(), acc.ID, body.BoundProxy); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		updated, err := a.db.GetAccount(r.Context(), acc.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, updated.Public())
+	case http.MethodGet:
+		acc, ok := a.resolveAccountFromQuery(w, r)
+		if !ok {
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"bound_proxy": acc.BoundProxy, "openid": acc.OpenID})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
 func (a *App) handleGetCode(w http.ResponseWriter, r *http.Request) {
 	if !acceptWXAppRoute(w, r, "/wxapp/getCode") {
 		return
 	}
 	a.callWXApp(w, r, false, a.invokeGetCode)
+}
+
+// handleWxCodeCompat 兼容旧版 wx_server 的 /wx/code 接口格式
+// 请求: POST /wx/code  body: { appid, openid }  headers: { auth(忽略) }
+// 响应: { code:0, data:{ code:"xxx" } }
+func (a *App) handleWxCodeCompat(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/wx/code" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		AppID  string `json:"appid"`
+		OpenID string `json:"openid"`
+	}
+	if err := decodeOptionalJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.OpenID == "" {
+		writeError(w, http.StatusBadRequest, "openid is required")
+		return
+	}
+	if body.AppID == "" {
+		writeError(w, http.StatusBadRequest, "appid is required")
+		return
+	}
+	acc, ok := a.resolveAccountRef(w, r, body.OpenID)
+	if !ok {
+		return
+	}
+	effectiveProxy := resolveEffectiveProxy(acc.BoundProxy, a.cfg.TCPProxy)
+	result, err := a.invokeWXApp(r.Context(), acc, body.AppID, effectiveProxy, nil, func(ctx context.Context, acc *store.WechatAccount, appID string, proxy string, _ map[string]any) (map[string]any, error) {
+		return a.pool.GetCode(ctx, acc.LoginBuffer, appID, acc.ID, proxy)
+	})
+	if err != nil {
+		var expired accountExpiredError
+		if errors.As(err, &expired) {
+			writeError(w, http.StatusConflict, "account login_buffer expired; re-scan required")
+		} else {
+			writeError(w, http.StatusBadGateway, "get code failed: "+err.Error())
+		}
+		return
+	}
+	// 兼容旧格式: { code:0, data:{ code:"xxx" } }
+	writeJSON(w, http.StatusOK, map[string]any{"code": result["code"]})
 }
 
 func (a *App) handleGetPhoneNumber(w http.ResponseWriter, r *http.Request) {
@@ -436,7 +526,7 @@ type wxappRequest struct {
 	Payload map[string]any `json:"payload"`
 }
 
-type wxappCall func(ctx context.Context, acc *store.WechatAccount, appID string, payload map[string]any) (map[string]any, error)
+type wxappCall func(ctx context.Context, acc *store.WechatAccount, appID string, proxy string, payload map[string]any) (map[string]any, error)
 
 func (a *App) callWXApp(w http.ResponseWriter, r *http.Request, requirePayload bool, call wxappCall) {
 	var body wxappRequest
@@ -460,7 +550,8 @@ func (a *App) callWXApp(w http.ResponseWriter, r *http.Request, requirePayload b
 	if !ok {
 		return
 	}
-	result, err := a.invokeWXApp(r.Context(), acc, body.AppID, body.Payload, call)
+	effectiveProxy := resolveEffectiveProxy(acc.BoundProxy, a.cfg.TCPProxy)
+	result, err := a.invokeWXApp(r.Context(), acc, body.AppID, effectiveProxy, body.Payload, call)
 	if err != nil {
 		var expired accountExpiredError
 		switch {
@@ -598,10 +689,9 @@ type accountExpiredError struct{ openid string }
 
 func (e accountExpiredError) Error() string { return "account expired: " + e.openid }
 
-func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID string, payload map[string]any, call wxappCall) (map[string]any, error) {
-	proxy := a.cfg.TCPProxy
+func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID string, proxy string, payload map[string]any, call wxappCall) (map[string]any, error) {
 	if _, err := a.db.GetSession(ctx, acc.ID, proxy); err == nil {
-		result, err := call(ctx, acc, appID, payload)
+		result, err := call(ctx, acc, appID, proxy, payload)
 		if err == nil {
 			return result, nil
 		}
@@ -615,19 +705,19 @@ func (a *App) invokeWXApp(ctx context.Context, acc *store.WechatAccount, appID s
 	if err == nil && fresh != nil {
 		acc = fresh
 	}
-	return call(ctx, acc, appID, payload)
+	return call(ctx, acc, appID, proxy, payload)
 }
 
-func (a *App) invokeGetCode(ctx context.Context, acc *store.WechatAccount, appID string, _ map[string]any) (map[string]any, error) {
-	return a.pool.GetCode(ctx, acc.LoginBuffer, appID, acc.ID, a.cfg.TCPProxy)
+func (a *App) invokeGetCode(ctx context.Context, acc *store.WechatAccount, appID string, proxy string, _ map[string]any) (map[string]any, error) {
+	return a.pool.GetCode(ctx, acc.LoginBuffer, appID, acc.ID, proxy)
 }
 
-func (a *App) invokeGetPhoneNumber(ctx context.Context, acc *store.WechatAccount, appID string, _ map[string]any) (map[string]any, error) {
-	return a.pool.GetPhoneNumber(ctx, acc.LoginBuffer, appID, acc.ID, a.cfg.TCPProxy)
+func (a *App) invokeGetPhoneNumber(ctx context.Context, acc *store.WechatAccount, appID string, proxy string, _ map[string]any) (map[string]any, error) {
+	return a.pool.GetPhoneNumber(ctx, acc.LoginBuffer, appID, acc.ID, proxy)
 }
 
-func (a *App) invokeOperateWXData(ctx context.Context, acc *store.WechatAccount, appID string, payload map[string]any) (map[string]any, error) {
-	return a.pool.OperateWXData(ctx, acc.LoginBuffer, appID, payload, acc.ID, a.cfg.TCPProxy)
+func (a *App) invokeOperateWXData(ctx context.Context, acc *store.WechatAccount, appID string, proxy string, payload map[string]any) (map[string]any, error) {
+	return a.pool.OperateWXData(ctx, acc.LoginBuffer, appID, payload, acc.ID, proxy)
 }
 
 func refreshOut(acc *store.WechatAccount, status string) map[string]any {
@@ -814,6 +904,13 @@ func safeName(s string) string {
 		}
 	}
 	return b.String()
+}
+
+func resolveEffectiveProxy(bound, global string) string {
+	if bound != "" {
+		return bound
+	}
+	return global
 }
 
 func sortedKeys[M ~map[string]V, V any](m M) []string {

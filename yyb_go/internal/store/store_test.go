@@ -27,6 +27,7 @@ CREATE TABLE wechat_accounts (
     login_buffer    TEXT    NOT NULL,
     credentials     TEXT,
     status          TEXT,
+    bound_proxy     TEXT    NOT NULL DEFAULT '',
     last_checked_at INTEGER,
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL

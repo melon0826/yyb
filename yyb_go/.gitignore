@@ -1,0 +1,7 @@
+# Build artifacts
+yyb-go-static
+
+# Runtime data
+resource/db/
+resource/avatars/
+resource/qr/

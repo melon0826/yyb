@@ -117,6 +117,26 @@ func newOpenAPISpec() map[string]any {
 					}),
 				),
 			},
+			"/accounts/proxy": map[string]any{
+				"get": openAPIOperation(
+					[]string{"accounts"},
+					"获取账号绑定代理",
+					[]map[string]any{queryStringParam("ref", "账号 ID、UIN 或 openid。", true)},
+					nil,
+					defaulted(map[string]any{
+						"200": jsonResponse("账号代理配置。", refSchema("AccountProxyResponse")),
+					}),
+				),
+				"put": openAPIOperation(
+					[]string{"accounts"},
+					"设置账号绑定代理",
+					[]map[string]any{queryStringParam("ref", "账号 ID、UIN 或 openid。", true)},
+					jsonRequestBody(refSchema("AccountProxyRequest")),
+					defaulted(map[string]any{
+						"200": jsonResponse("更新后的账号信息。", refSchema("AccountPublic")),
+					}),
+				),
+			},
 			"/accounts/avatar": map[string]any{
 				"get": openAPIOperation(
 					[]string{"accounts"},
@@ -199,9 +219,17 @@ func newOpenAPISpec() map[string]any {
 					"nickname":        nullableStringSchema("账号昵称。"),
 					"avatar":          nullableStringSchema("本地头像路径或远程头像 URL。"),
 					"status":          nullableStringSchema("账号状态。"),
+					"bound_proxy":     map[string]any{"type": "string", "description": "账号绑定的代理出口，如 socks5://host:port。为空时使用全局代理。", "example": "socks5://192.168.1.1:1080"},
 					"last_checked_at": nullableInt64Schema(),
 					"created_at":      int64Schema(),
 					"updated_at":      int64Schema(),
+				}),
+				"AccountProxyRequest": objectSchema([]string{"bound_proxy"}, map[string]any{
+					"bound_proxy": map[string]any{"type": "string", "description": "代理地址，支持 socks5://host:port 或 http-connect://host:port。传空字符串清除绑定。", "example": "socks5://192.168.1.1:1080"},
+				}),
+				"AccountProxyResponse": objectSchema(nil, map[string]any{
+					"bound_proxy": map[string]any{"type": "string"},
+					"openid":      map[string]any{"type": "string"},
 				}),
 				"RefreshResult": objectSchema([]string{"id", "openid", "status"}, map[string]any{
 					"id":       int64Schema(),
