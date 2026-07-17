@@ -1,0 +1,12 @@
+services:
+  yyb-go:
+    build: .
+    container_name: yyb-go
+    ports:
+      - "8000:8000"
+    volumes:
+      - yyb-data:/app/resource/db
+    restart: unless-stopped
+
+volumes:
+  yyb-data:
