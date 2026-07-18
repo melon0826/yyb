@@ -659,20 +659,15 @@ func (a *App) handleWxGetUserInfo(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if acc.Credentials == nil {
-		writeError(w, http.StatusBadRequest, "account has no session credentials; re-scan required")
-		return
-	}
-	sessionKey := stringFromAny(acc.Credentials["session_key"])
-	if sessionKey == "" {
-		writeError(w, http.StatusBadRequest, "session_key not found in account credentials")
-		return
-	}
 	resp := map[string]any{
-		"openid":      acc.OpenID,
-		"session_key": sessionKey,
+		"openid": acc.OpenID,
 	}
-	// 兼容旧脚本：如果提供了 appid/app_id，也返回 wx.login code
+	if acc.Credentials != nil {
+		if sk := stringFromAny(acc.Credentials["session_key"]); sk != "" {
+			resp["session_key"] = sk
+		}
+	}
+	// 兼容旧脚本：如果提供了 appid/app_id，返回 wx.login code
 	if body.AppID != "" {
 		effectiveProxy := resolveEffectiveProxy(acc.BoundProxy, a.cfg.TCPProxy)
 		result, err := a.invokeWXApp(r.Context(), acc, body.AppID, effectiveProxy, nil, func(ctx context.Context, acc *store.WechatAccount, appID string, proxy string, _ map[string]any) (map[string]any, error) {
@@ -828,7 +823,7 @@ func (a *App) handleWxHeart(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleWxQRCodeAuth 处理二维码认证回调
-// POST /wx/qrcodeauth  body: { data, ref }
+// POST /wx/qrcodeauth  body: { data, ref } 或兼容格式 { openid, uuid }
 func (a *App) handleWxQRCodeAuth(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/wx/qrcodeauth" {
 		writeError(w, http.StatusNotFound, "not found")
@@ -839,16 +834,24 @@ func (a *App) handleWxQRCodeAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Data string `json:"data"`
-		Ref  string `json:"ref"`
+		Data   string `json:"data"`
+		Ref    string `json:"ref"`
+		OpenID string `json:"openid"`
+		UUID   string `json:"uuid"`
 	}
 	if err := decodeOptionalJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
-	if body.Data == "" {
-		writeError(w, http.StatusBadRequest, "data is required")
+	if body.Ref == "" {
+		body.Ref = body.OpenID
+	}
+	if body.Ref == "" {
+		writeError(w, http.StatusBadRequest, "ref or openid is required")
 		return
+	}
+	if body.Data == "" {
+		body.Data = body.UUID
 	}
 	acc, ok := a.resolveAccountRef(w, r, body.Ref)
 	if !ok {
@@ -856,7 +859,7 @@ func (a *App) handleWxQRCodeAuth(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"openid": acc.OpenID,
-		"data":   body.Data,
+		"uuid":   body.Data,
 		"status": "received",
 	})
 }
