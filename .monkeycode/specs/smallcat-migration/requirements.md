@@ -74,3 +74,30 @@
 1. WHEN 账号配置了 bound_proxy, THE 系统 SHALL 优先使用该代理
 2. WHEN 账号未配置代理但服务配置了全局 --tcp-proxy, THE 系统 SHALL 使用全局代理
 3. WHEN 两者均未配置, THE 系统 SHALL 直连
+
+### Requirement 7: 账号管理 CRUD
+
+**User Story:** AS 管理员, I want 通过 API 管理账号生命周期, so that 可以在面板上完成增删改查
+
+#### Acceptance Criteria
+
+1. THE 系统 SHALL 支持 POST /accounts/disable 切换账号禁用状态 (openid + disabled bool)
+2. THE 系统 SHALL 支持 POST /accounts/remark 修改账号备注名 (openid + displayName)
+3. THE 系统 SHALL 支持 POST /accounts/status 批量查询账号状态 (openid 数组)
+4. THE 系统 SHALL 支持 DELETE /accounts 删除账号 (已实现)
+5. THE 数据库 SHALL 包含 disabled 字段用于标记禁用状态
+
+### Requirement 8: 微信 API 补全
+
+**User Story:** AS 青龙脚本用户, I want 通过标准微信 API 接口调用各项功能, so that 脚本开发和调试更方便
+
+#### Acceptance Criteria
+
+1. THE 系统 SHALL 提供 POST /wx/getuserinfo 获取用户信息 (ref + app_id + encrypted_data + iv)
+2. THE 系统 SHALL 提供 POST /wx/encryptkey 获取加密密钥 (ref + app_id)
+3. THE 系统 SHALL 提供 POST /wx/oauth 处理 OAuth 回调 (code + state + ref)
+4. THE 系统 SHALL 提供 POST /wx/autoauth 自动 OAuth 登录 (code + app_id + ref)
+5. THE 系统 SHALL 提供 POST /wx/heart 心跳保活端点
+6. THE 系统 SHALL 提供 POST /wx/qrcodeauth 二维码认证回调处理
+7. THE 系统 SHALL 提供 POST /wx/code 获取小程序登录 code (已实现，兼容旧格式)
+8. 以上 /wx/* 端点 SHALL 无需 Basic Auth 鉴权

@@ -59,18 +59,24 @@ graph TD
 
 ## Data Models
 
-无需新增表。现有 `wechat_accounts` 表结构已满足需求：
+`wechat_accounts` 表新增 `disabled` 字段：
 
-| 字段 | 用途 |
-|------|------|
-| id | 主键 |
-| openid | 微信 openid |
-| nickname | 昵称 |
-| avatar_url | 头像本地路径 |
-| status | alive/expired/pending |
-| bound_proxy | 账号绑定代理 |
-| login_buffer | session 数据 |
-| last_active | 最后活跃时间 |
+| 字段 | 类型 | 用途 |
+|------|------|------|
+| id | INTEGER | 主键 |
+| openid | TEXT | 微信 openid |
+| nickname | TEXT | 昵称 |
+| avatar | TEXT | 头像本地路径 |
+| status | TEXT | alive/expired/pending |
+| bound_proxy | TEXT | 账号绑定代理 |
+| disabled | INTEGER | 禁用状态 (0/1, 默认0) |
+| login_buffer | TEXT | session 数据 |
+| last_checked_at | INTEGER | 最后活跃时间 |
+
+新增 store 方法：
+- `SetAccountDisabled(ctx, id, disabled)` - 设置账号禁用状态
+- `SetAccountAlias(ctx, id, alias)` - 设置备注名
+- `BatchAccountStatus(ctx, openids)` - 批量查询账号状态
 
 ## API Endpoints
 
@@ -78,12 +84,24 @@ graph TD
 |------|------|------|------|
 | GET | / | Basic Auth | 仪表盘页面 |
 | GET | /api/dashboard | 无 | 获取账号概览 JSON |
-| POST | /wx/code | 无 | 兼容旧脚本 |
-| POST | /wxapp/getCode | 无 | 新版脚本接口 |
+| GET | /accounts | Basic Auth | 获取账号列表 |
+| DELETE | /accounts | Basic Auth | 删除账号 |
+| PUT | /accounts/proxy | Basic Auth | 设置账号代理 |
+| POST | /accounts/disable | Basic Auth | 切换账号禁用状态 |
+| POST | /accounts/remark | Basic Auth | 修改账号备注名 |
+| POST | /accounts/status | Basic Auth | 批量查询账号状态 |
 | POST | /qr | Basic Auth | 创建扫码二维码 |
 | GET | /qr/* | Basic Auth | 轮询扫码状态 |
-| PUT | /accounts/proxy | Basic Auth | 设置账号代理 |
-| GET | /accounts | Basic Auth | 获取账号列表 |
+| POST | /wx/code | 无 | 获取小程序登录 code (兼容旧格式) |
+| POST | /wxapp/getCode | 无 | 新版 code 接口 |
+| POST | /wxapp/getPhoneNumber | 无 | 获取手机号 |
+| POST | /wxapp/operateWxData | 无 | 通用云函数代理 |
+| POST | /wx/getuserinfo | 无 | 获取用户信息 |
+| POST | /wx/encryptkey | 无 | 获取加密密钥 |
+| POST | /wx/oauth | 无 | OAuth 回调处理 |
+| POST | /wx/autoauth | 无 | 自动 OAuth 登录 |
+| POST | /wx/heart | 无 | 心跳保活 |
+| POST | /wx/qrcodeauth | 无 | 二维码认证回调 |
 
 ## Docker Configuration
 
@@ -123,3 +141,35 @@ docker run -d -p 8000:8000 --name yyb-go \
 ## Implementation Order
 
 1. auth 中间件 → 2. dashboard API → 3. 前端仪表盘 → 4. Docker 环境变量 → 5. compose 更新
+6. 账号管理 CRUD (disable/remark/status-batch) - 已完成
+7. 微信 API 补全 (getuserinfo/encryptkey/oauth/autoauth/heart/qrcodeauth) - 已完成
+
+## smallcat 功能覆盖状态 (28/28)
+
+| 端点 | yyb_go | 状态 |
+|------|--------|------|
+| GET /api/accounts | GET /accounts | 已有 |
+| POST /api/accounts/add | QR扫码 | 已有 |
+| POST /api/accounts/delete | DELETE /accounts | 已有 |
+| POST /api/accounts/disable | POST /accounts/disable | 新增 |
+| POST /api/accounts/remark | POST /accounts/remark | 新增 |
+| POST /api/accounts/status | POST /accounts/status | 新增 |
+| GET /api/auth/validate | Basic Auth | 已有(不同机制) |
+| GET /api/health | GET /health | 已有 |
+| POST /api/qr/start | POST /qr | 已有 |
+| GET /api/qr/status | GET /qr/*/poll | 已有 |
+| POST /wx/code | POST /wx/code | 已有 |
+| POST /wx/oauth | POST /wx/oauth | 新增 |
+| POST /wx/autoauth | POST /wx/autoauth | 新增 |
+| POST /wx/qrcodeauth | POST /wx/qrcodeauth | 新增 |
+| POST /wx/encryptkey | POST /wx/encryptkey | 新增 |
+| POST /wx/getuserinfo | POST /wx/getuserinfo | 新增 |
+| POST /wx/heart | POST /wx/heart | 新增 |
+| POST /wx/getphonenumber | /wxapp/getPhoneNumber | 已有(不同路径) |
+| GET /api/proxies | N/A | 暂缓(后续) |
+| POST /api/proxies/* | N/A | 暂缓(后续) |
+| POST /wx/appmsgext | N/A | 暂缓(后续) |
+| POST /wx/appmsglike | N/A | 暂缓(后续) |
+| POST /wx/cloud | /wxapp/operateWxData | 已有(通用) |
+| GET /credits/balance | N/A | smallcat特有(不迁移) |
+| GET /credits/ledger | N/A | smallcat特有(不迁移) |

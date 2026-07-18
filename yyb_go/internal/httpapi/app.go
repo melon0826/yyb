@@ -134,10 +134,19 @@ func (a *App) Handler() http.Handler {
 	router.Any("/accounts/refresh", gin.WrapF(a.handleAccountRefresh))
 	router.Any("/accounts/resync", gin.WrapF(a.handleAccountResync))
 	router.Any("/accounts/proxy", gin.WrapF(a.handleAccountProxy))
+	router.Any("/accounts/disable", gin.WrapF(a.handleAccountDisable))
+	router.Any("/accounts/remark", gin.WrapF(a.handleAccountRemark))
+	router.Any("/accounts/status", gin.WrapF(a.handleAccountStatus))
 	router.Any("/wxapp/getCode", gin.WrapF(a.handleGetCode))
 	router.Any("/wxapp/getPhoneNumber", gin.WrapF(a.handleGetPhoneNumber))
 	router.Any("/wxapp/operateWxData", gin.WrapF(a.handleOperateWXData))
 	router.Any("/wx/code", gin.WrapF(a.handleWxCodeCompat))
+	router.Any("/wx/getuserinfo", gin.WrapF(a.handleWxGetUserInfo))
+	router.Any("/wx/encryptkey", gin.WrapF(a.handleWxEncryptKey))
+	router.Any("/wx/oauth", gin.WrapF(a.handleWxOAuth))
+	router.Any("/wx/autoauth", gin.WrapF(a.handleWxAutoOAuth))
+	router.Any("/wx/heart", gin.WrapF(a.handleWxHeart))
+	router.Any("/wx/qrcodeauth", gin.WrapF(a.handleWxQRCodeAuth))
 	router.NoRoute(func(c *gin.Context) {
 		writeError(c.Writer, http.StatusNotFound, "not found")
 	})
@@ -438,6 +447,108 @@ func (a *App) handleAccountProxy(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *App) handleAccountDisable(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/accounts/disable" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		OpenID   string `json:"openid"`
+		Disabled bool   `json:"disabled"`
+	}
+	if err := decodeOptionalJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.OpenID == "" {
+		writeError(w, http.StatusBadRequest, "openid is required")
+		return
+	}
+	acc, ok := a.resolveAccountRef(w, r, body.OpenID)
+	if !ok {
+		return
+	}
+	if err := a.db.SetAccountDisabled(r.Context(), acc.ID, body.Disabled); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	updated, err := a.db.GetAccount(r.Context(), acc.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"account": updated.Public()})
+}
+
+func (a *App) handleAccountRemark(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/accounts/remark" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		OpenID      string `json:"openid"`
+		DisplayName string `json:"displayName"`
+	}
+	if err := decodeOptionalJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.OpenID == "" {
+		writeError(w, http.StatusBadRequest, "openid is required")
+		return
+	}
+	acc, ok := a.resolveAccountRef(w, r, body.OpenID)
+	if !ok {
+		return
+	}
+	if err := a.db.SetAccountAlias(r.Context(), acc.ID, body.DisplayName); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	updated, err := a.db.GetAccount(r.Context(), acc.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"account": updated.Public()})
+}
+
+func (a *App) handleAccountStatus(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/accounts/status" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		OpenID []string `json:"openid"`
+	}
+	if err := decodeOptionalJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if len(body.OpenID) == 0 {
+		writeError(w, http.StatusBadRequest, "openid is required")
+		return
+	}
+	accounts, err := a.db.BatchAccountStatus(r.Context(), body.OpenID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, accounts)
+}
+
 func (a *App) handleGetCode(w http.ResponseWriter, r *http.Request) {
 	if !acceptWXAppRoute(w, r, "/wxapp/getCode") {
 		return
@@ -494,6 +605,234 @@ func (a *App) handleWxCodeCompat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"code": result["code"]})
 }
 
+// handleWxGetUserInfo 处理微信用户信息获取请求
+// POST /wx/getuserinfo  body: { ref, app_id, encrypted_data, iv }
+func (a *App) handleWxGetUserInfo(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/wx/getuserinfo" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		Ref           string `json:"ref"`
+		AppID         string `json:"app_id"`
+		EncryptedData string `json:"encrypted_data"`
+		IV            string `json:"iv"`
+	}
+	if err := decodeOptionalJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.Ref == "" {
+		writeError(w, http.StatusBadRequest, "ref is required")
+		return
+	}
+	if body.AppID == "" {
+		writeError(w, http.StatusBadRequest, "app_id is required")
+		return
+	}
+	acc, ok := a.resolveAccountRef(w, r, body.Ref)
+	if !ok {
+		return
+	}
+	if acc.Credentials == nil {
+		writeError(w, http.StatusBadRequest, "account has no session credentials; re-scan required")
+		return
+	}
+	sessionKey := stringFromAny(acc.Credentials["session_key"])
+	if sessionKey == "" {
+		writeError(w, http.StatusBadRequest, "session_key not found in account credentials")
+		return
+	}
+	// Return the decryption context so the caller can decrypt locally
+	writeJSON(w, http.StatusOK, map[string]any{
+		"openid":      acc.OpenID,
+		"session_key": sessionKey,
+		"encrypted_data": body.EncryptedData,
+		"iv":           body.IV,
+		"hint":         "decrypt encrypted_data with AES-128-CBC using session_key and iv; PKCS7 padding",
+	})
+}
+
+// handleWxEncryptKey 返回加密密钥
+// POST /wx/encryptkey  body: { ref, app_id }
+func (a *App) handleWxEncryptKey(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/wx/encryptkey" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		Ref   string `json:"ref"`
+		AppID string `json:"app_id"`
+	}
+	if err := decodeOptionalJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.Ref == "" {
+		writeError(w, http.StatusBadRequest, "ref is required")
+		return
+	}
+	acc, ok := a.resolveAccountRef(w, r, body.Ref)
+	if !ok {
+		return
+	}
+	sessionKey := ""
+	if acc.Credentials != nil {
+		sessionKey = stringFromAny(acc.Credentials["session_key"])
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"openid":      acc.OpenID,
+		"session_key": sessionKey,
+		"key":         sessionKey,
+	})
+}
+
+// handleWxOAuth 处理微信 OAuth 回调
+// POST /wx/oauth  body: { code, state, ref }
+func (a *App) handleWxOAuth(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/wx/oauth" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		Code  string `json:"code"`
+		State string `json:"state"`
+		Ref   string `json:"ref"`
+	}
+	if err := decodeOptionalJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.Code == "" {
+		writeError(w, http.StatusBadRequest, "code is required")
+		return
+	}
+	acc, ok := a.resolveAccountRef(w, r, body.Ref)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"openid": acc.OpenID,
+		"code":   body.Code,
+		"state":  body.State,
+		"status": "received",
+	})
+}
+
+// handleWxAutoOAuth 自动 OAuth 登录
+// POST /wx/autoauth  body: { code, app_id, ref }
+func (a *App) handleWxAutoOAuth(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/wx/autoauth" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		Code  string `json:"code"`
+		AppID string `json:"app_id"`
+		Ref   string `json:"ref"`
+	}
+	if err := decodeOptionalJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.Code == "" || body.AppID == "" {
+		writeError(w, http.StatusBadRequest, "code and app_id are required")
+		return
+	}
+	acc, ok := a.resolveAccountRef(w, r, body.Ref)
+	if !ok {
+		return
+	}
+	effectiveProxy := resolveEffectiveProxy(acc.BoundProxy, a.cfg.TCPProxy)
+	result, err := a.invokeWXApp(r.Context(), acc, body.AppID, effectiveProxy, nil, func(ctx context.Context, acc *store.WechatAccount, appID string, proxy string, _ map[string]any) (map[string]any, error) {
+		return a.pool.GetCode(ctx, acc.LoginBuffer, appID, acc.ID, proxy)
+	})
+	if err != nil {
+		var expired accountExpiredError
+		if errors.As(err, &expired) {
+			writeError(w, http.StatusConflict, "account login_buffer expired; re-scan required")
+		} else {
+			writeError(w, http.StatusBadGateway, "auto oauth failed: "+err.Error())
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"openid": acc.OpenID,
+		"code":   result["code"],
+	})
+}
+
+// handleWxHeart 心跳保活
+// POST /wx/heart  body: { ref }
+func (a *App) handleWxHeart(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/wx/heart" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		Ref string `json:"ref"`
+	}
+	_ = decodeOptionalJSON(r, &body)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":    "ok",
+		"timestamp": time.Now().Unix(),
+	})
+}
+
+// handleWxQRCodeAuth 处理二维码认证回调
+// POST /wx/qrcodeauth  body: { data, ref }
+func (a *App) handleWxQRCodeAuth(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/wx/qrcodeauth" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		Data string `json:"data"`
+		Ref  string `json:"ref"`
+	}
+	if err := decodeOptionalJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.Data == "" {
+		writeError(w, http.StatusBadRequest, "data is required")
+		return
+	}
+	acc, ok := a.resolveAccountRef(w, r, body.Ref)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"openid": acc.OpenID,
+		"data":   body.Data,
+		"status": "received",
+	})
+}
+
 // handleDashboard 返回账号概览
 func (a *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -527,6 +866,7 @@ func (a *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			"id":           acc.ID,
 			"openid":       acc.OpenID,
 			"status":       status,
+			"disabled":     acc.Disabled,
 			"bound_proxy":  acc.BoundProxy,
 			"last_checked": "",
 		}

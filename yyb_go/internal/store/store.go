@@ -26,8 +26,9 @@ CREATE TABLE IF NOT EXISTS wechat_accounts (
     login_buffer    TEXT    NOT NULL,
     credentials     TEXT,
     status          TEXT,
-    bound_proxy     TEXT    NOT NULL DEFAULT '',
-    last_checked_at INTEGER,
+	bound_proxy     TEXT    NOT NULL DEFAULT '',
+	disabled        INTEGER NOT NULL DEFAULT 0,
+	last_checked_at INTEGER,
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL
 );
@@ -76,6 +77,7 @@ type WechatAccount struct {
 	Credentials   map[string]any `json:"credentials,omitempty"`
 	Status        *string        `json:"status,omitempty"`
 	BoundProxy    string         `json:"bound_proxy,omitempty"`
+	Disabled      bool           `json:"disabled"`
 	LastCheckedAt *int64         `json:"last_checked_at,omitempty"`
 	CreatedAt     int64          `json:"created_at"`
 	UpdatedAt     int64          `json:"updated_at"`
@@ -90,6 +92,7 @@ type AccountPublic struct {
 	Avatar        *string `json:"avatar"`
 	Status        *string `json:"status"`
 	BoundProxy    string  `json:"bound_proxy"`
+	Disabled      bool    `json:"disabled"`
 	LastCheckedAt *int64  `json:"last_checked_at"`
 	CreatedAt     int64   `json:"created_at"`
 	UpdatedAt     int64   `json:"updated_at"`
@@ -331,6 +334,66 @@ func (db *DB) DeleteAccount(ctx context.Context, id int64) error {
 	return err
 }
 
+func (db *DB) SetAccountDisabled(ctx context.Context, id int64, disabled bool) error {
+	v := 0
+	if disabled {
+		v = 1
+	}
+	_, err := db.sql.ExecContext(ctx,
+		"UPDATE wechat_accounts SET disabled=?, updated_at=? WHERE id=?",
+		v, time.Now().Unix(), id,
+	)
+	return err
+}
+
+func (db *DB) SetAccountAlias(ctx context.Context, id int64, alias string) error {
+	_, err := db.sql.ExecContext(ctx,
+		"UPDATE wechat_accounts SET alias=?, updated_at=? WHERE id=?",
+		nullableString(&alias), time.Now().Unix(), id,
+	)
+	return err
+}
+
+func (db *DB) BatchAccountStatus(ctx context.Context, openids []string) ([]AccountPublic, error) {
+	if len(openids) == 0 {
+		return nil, nil
+	}
+	rows, err := db.sql.QueryContext(ctx, selectAccountSQL+" WHERE openid IN ("+placeholders(len(openids))+")", stringsToAny(openids)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AccountPublic
+	for rows.Next() {
+		acc, err := scanAccountRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, acc.Public())
+	}
+	return out, rows.Err()
+}
+
+func placeholders(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	b := make([]byte, 0, n*2-1)
+	b = append(b, '?')
+	for i := 1; i < n; i++ {
+		b = append(b, ',', '?')
+	}
+	return string(b)
+}
+
+func stringsToAny(vals []string) []any {
+	out := make([]any, len(vals))
+	for i, v := range vals {
+		out[i] = v
+	}
+	return out
+}
+
 func (db *DB) GetSession(ctx context.Context, accountID int64, tcpProxy string) (*SessionRow, error) {
 	row := db.sql.QueryRowContext(ctx,
 		"SELECT id, wechat_account_id, uin, tcp_proxy, session_blob, expires_at, created_at, updated_at FROM sessions WHERE wechat_account_id=? AND tcp_proxy=? AND expires_at>?",
@@ -437,13 +500,14 @@ func (a *WechatAccount) Public() AccountPublic {
 		Avatar:        a.Avatar,
 		Status:        a.Status,
 		BoundProxy:    a.BoundProxy,
+		Disabled:      a.Disabled,
 		LastCheckedAt: a.LastCheckedAt,
 		CreatedAt:     a.CreatedAt,
 		UpdatedAt:     a.UpdatedAt,
 	}
 }
 
-const selectAccountSQL = `SELECT id, openid, uin, alias, nickname, avatar, user_info, login_buffer, credentials, status, bound_proxy, last_checked_at, created_at, updated_at FROM wechat_accounts`
+const selectAccountSQL = `SELECT id, openid, uin, alias, nickname, avatar, user_info, login_buffer, credentials, status, bound_proxy, disabled, last_checked_at, created_at, updated_at FROM wechat_accounts`
 
 type accountScanner interface {
 	Scan(dest ...any) error
@@ -467,7 +531,7 @@ func scanAccountRows(row accountScanner) (*WechatAccount, error) {
 	)
 	err := row.Scan(
 		&a.ID, &a.OpenID, &uin, &alias, &nickname, &avatar, &userJSON,
-		&a.LoginBuffer, &credJSON, &status, &a.BoundProxy, &lastChecked, &a.CreatedAt, &a.UpdatedAt,
+		&a.LoginBuffer, &credJSON, &status, &a.BoundProxy, &a.Disabled, &lastChecked, &a.CreatedAt, &a.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
