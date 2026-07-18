@@ -148,6 +148,8 @@ func (a *App) Handler() http.Handler {
 	router.Any("/wx/autoauth", gin.WrapF(a.handleWxAutoOAuth))
 	router.Any("/wx/heart", gin.WrapF(a.handleWxHeart))
 	router.Any("/wx/qrcodeauth", gin.WrapF(a.handleWxQRCodeAuth))
+	router.Any("/wx/call/init", gin.WrapF(a.handleWxCallInit))
+	router.Any("/wx/cloud/call", gin.WrapF(a.handleWxCloudCall))
 	router.NoRoute(func(c *gin.Context) {
 		writeError(c.Writer, http.StatusNotFound, "not found")
 	})
@@ -832,6 +834,92 @@ func (a *App) handleWxQRCodeAuth(w http.ResponseWriter, r *http.Request) {
 		"data":   body.Data,
 		"status": "received",
 	})
+}
+
+// handleWxCallInit 小程序云函数初始化（触发静默注册）
+// POST /wx/call/init  body: { appid, openid }
+func (a *App) handleWxCallInit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		AppID  string `json:"appid"`
+		OpenID string `json:"openid"`
+	}
+	if err := decodeOptionalJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.OpenID == "" {
+		writeError(w, http.StatusBadRequest, "openid is required")
+		return
+	}
+	if body.AppID == "" {
+		writeError(w, http.StatusBadRequest, "appid is required")
+		return
+	}
+	acc, ok := a.resolveAccountRef(w, r, body.OpenID)
+	if !ok {
+		return
+	}
+	effectiveProxy := resolveEffectiveProxy(acc.BoundProxy, a.cfg.TCPProxy)
+	_, err := a.invokeWXApp(r.Context(), acc, body.AppID, effectiveProxy, nil, func(ctx context.Context, acc *store.WechatAccount, appID string, proxy string, _ map[string]any) (map[string]any, error) {
+		return a.pool.GetCode(ctx, acc.LoginBuffer, appID, acc.ID, proxy)
+	})
+	if err != nil {
+		var expired accountExpiredError
+		if errors.As(err, &expired) {
+			writeError(w, http.StatusConflict, "account login_buffer expired; re-scan required")
+		} else {
+			writeError(w, http.StatusBadGateway, "init failed: "+err.Error())
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"openid": acc.OpenID, "appid": body.AppID, "status": "initialized"})
+}
+
+// handleWxCloudCall 小程序云函数调用
+// POST /wx/cloud/call  body: { appid, openid }
+func (a *App) handleWxCloudCall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		AppID  string `json:"appid"`
+		OpenID string `json:"openid"`
+	}
+	if err := decodeOptionalJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.OpenID == "" {
+		writeError(w, http.StatusBadRequest, "openid is required")
+		return
+	}
+	if body.AppID == "" {
+		writeError(w, http.StatusBadRequest, "appid is required")
+		return
+	}
+	acc, ok := a.resolveAccountRef(w, r, body.OpenID)
+	if !ok {
+		return
+	}
+	effectiveProxy := resolveEffectiveProxy(acc.BoundProxy, a.cfg.TCPProxy)
+	result, err := a.invokeWXApp(r.Context(), acc, body.AppID, effectiveProxy, nil, func(ctx context.Context, acc *store.WechatAccount, appID string, proxy string, _ map[string]any) (map[string]any, error) {
+		return a.pool.GetCode(ctx, acc.LoginBuffer, appID, acc.ID, proxy)
+	})
+	if err != nil {
+		var expired accountExpiredError
+		if errors.As(err, &expired) {
+			writeError(w, http.StatusConflict, "account login_buffer expired; re-scan required")
+		} else {
+			writeError(w, http.StatusBadGateway, "cloud call failed: "+err.Error())
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"openid": acc.OpenID, "appid": body.AppID, "result": result})
 }
 
 // handleDashboard 返回账号概览
