@@ -1,16 +1,18 @@
+version: "3.8"
+
 services:
   yyb-go:
     build: .
     container_name: yyb-go
+    restart: unless-stopped
     ports:
-      - "${YYB_PORT:-8000}:${YYB_PORT:-8000}"
+      - "8000:8000"
     environment:
-      - YYB_USERNAME=${YYB_USERNAME:-}
-      - YYB_PASSWORD=${YYB_PASSWORD:-}
-      - YYB_PORT=${YYB_PORT:-8000}
+      - YYB_USERNAME=melon0826
+      - YYB_PASSWORD=826523lgho
+      - YYB_PORT=8000
     volumes:
       - yyb-data:/app/resource/db
-    restart: unless-stopped
 
 volumes:
   yyb-data:
