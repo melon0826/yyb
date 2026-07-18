@@ -11,6 +11,21 @@ services:
       - YYB_PORT=8181
     volumes:
       - yyb-data:/app/resource/db
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8181"
+      - --resource-root
+      - ./resource
+      - --tcp-proxy
+      - http-connect://yyb-proxy:1080
+
+  yyb-proxy:
+    image: ghcr.io/melon0826/yyb/yyb-proxy:latest
+    container_name: yyb-proxy
+    restart: unless-stopped
+    network_mode: host
 
 volumes:
   yyb-data:
