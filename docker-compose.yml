@@ -1,6 +1,6 @@
 services:
   yyb-go:
-    image: ghcr.io/melon0826/yyb-go:latest
+    image: ghcr.io/melon0826/yyb:latest
     container_name: yyb-go
     restart: unless-stopped
     ports:

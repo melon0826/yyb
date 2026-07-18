@@ -30,4 +30,4 @@ jobs:
         with:
           context: ./yyb_go
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/yyb-go:latest
+          tags: ghcr.io/melon0826/yyb:latest
