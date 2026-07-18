@@ -3,6 +3,7 @@ package httpapi
 import (
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,11 +36,9 @@ func (g *authGuard) middleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		// 仅对页面请求鉴权，API 路径放行
 		path := c.Request.URL.Path
-		if path == "/api/dashboard" || path == "/wx/code" || path == "/wxapp/getCode" ||
-			path == "/wxapp/getPhoneNumber" || path == "/wxapp/operateWxData" ||
-			path == "/health" || path == "/openapi.json" {
+		// 放行所有 API 路径（/wx/、/wxapp/）和公开端点
+		if isAPIPath(path) {
 			c.Next()
 			return
 		}
@@ -60,6 +59,14 @@ func (g *authGuard) middleware() gin.HandlerFunc {
 		g.resetFailures(ip)
 		c.Next()
 	}
+}
+
+func isAPIPath(path string) bool {
+	return strings.HasPrefix(path, "/wx/") ||
+		strings.HasPrefix(path, "/wxapp/") ||
+		path == "/api/dashboard" ||
+		path == "/health" ||
+		path == "/openapi.json"
 }
 
 func (g *authGuard) isBlocked(ip string) bool {
