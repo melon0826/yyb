@@ -6,11 +6,11 @@ services:
     container_name: yyb-go
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "8181:8181"
     environment:
       - YYB_USERNAME=melon0826
       - YYB_PASSWORD=826523lgho
-      - YYB_PORT=8000
+      - YYB_PORT=8181
     volumes:
       - yyb-data:/app/resource/db
 
