@@ -370,7 +370,21 @@ func (a *App) handleAccountRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Ref == "" {
-		a.refreshAll(w, r)
+		// 兼容旧脚本用 openid 传账号
+		body.Ref = strings.TrimSpace(r.URL.Query().Get("openid"))
+		if body.Ref == "" && r.Method == http.MethodPost {
+			var alt struct {
+				OpenID string `json:"openid"`
+			}
+			if decodeOptionalJSON(r, &alt) == nil && alt.OpenID != "" {
+				body.Ref = alt.OpenID
+				// 重新解析完整 body
+				_ = decodeOptionalJSON(r, &body)
+			}
+		}
+	}
+	if body.Ref == "" {
+		writeError(w, http.StatusBadRequest, "ref is required")
 		return
 	}
 	acc, ok := a.resolveAccountRef(w, r, body.Ref)
@@ -621,7 +635,9 @@ func (a *App) handleWxGetUserInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Ref           string `json:"ref"`
+		OpenID        string `json:"openid"`
 		AppID         string `json:"app_id"`
+		AppIDAlt      string `json:"appid"`
 		EncryptedData string `json:"encrypted_data"`
 		IV            string `json:"iv"`
 	}
@@ -630,12 +646,14 @@ func (a *App) handleWxGetUserInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Ref == "" {
+		body.Ref = body.OpenID
+	}
+	if body.Ref == "" {
 		writeError(w, http.StatusBadRequest, "ref is required")
 		return
 	}
 	if body.AppID == "" {
-		writeError(w, http.StatusBadRequest, "app_id is required")
-		return
+		body.AppID = body.AppIDAlt
 	}
 	acc, ok := a.resolveAccountRef(w, r, body.Ref)
 	if !ok {
@@ -650,14 +668,21 @@ func (a *App) handleWxGetUserInfo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "session_key not found in account credentials")
 		return
 	}
-	// Return the decryption context so the caller can decrypt locally
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"openid":      acc.OpenID,
 		"session_key": sessionKey,
-		"encrypted_data": body.EncryptedData,
-		"iv":           body.IV,
-		"hint":         "decrypt encrypted_data with AES-128-CBC using session_key and iv; PKCS7 padding",
-	})
+	}
+	// 兼容旧脚本：如果提供了 appid/app_id，也返回 wx.login code
+	if body.AppID != "" {
+		effectiveProxy := resolveEffectiveProxy(acc.BoundProxy, a.cfg.TCPProxy)
+		result, err := a.invokeWXApp(r.Context(), acc, body.AppID, effectiveProxy, nil, func(ctx context.Context, acc *store.WechatAccount, appID string, proxy string, _ map[string]any) (map[string]any, error) {
+			return a.pool.GetCode(ctx, acc.LoginBuffer, appID, acc.ID, proxy)
+		})
+		if err == nil {
+			resp["code"] = result["code"]
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleWxEncryptKey 返回加密密钥
