@@ -1,0 +1,17 @@
+services:
+  qinglong:
+    image: whyour/qinglong:latest
+    container_name: qinglong
+    restart: unless-stopped
+    ports:
+      - "5700:5700"
+    environment:
+      # 脚本里通过这个变量连接 yyb_go
+      - wx_server_url=http://yyb-go:8181
+    volumes:
+      - /vol1/1000/Docker/yyb-GO/ql/data:/ql/data
+
+networks:
+  default:
+    name: yyb-go_default
+    external: true
