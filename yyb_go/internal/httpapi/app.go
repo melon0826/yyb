@@ -140,6 +140,7 @@ func (a *App) Handler() http.Handler {
 	router.Any("/wxapp/getCode", gin.WrapF(a.handleGetCode))
 	router.Any("/wxapp/getPhoneNumber", gin.WrapF(a.handleGetPhoneNumber))
 	router.Any("/wxapp/operateWxData", gin.WrapF(a.handleOperateWXData))
+	router.Any("/wxapp/checktoken", gin.WrapF(a.handleCheckToken))
 	router.Any("/wx/code", gin.WrapF(a.handleWxCodeCompat))
 	router.Any("/wx/getuserinfo", gin.WrapF(a.handleWxGetUserInfo))
 	router.Any("/wx/encryptkey", gin.WrapF(a.handleWxEncryptKey))
@@ -904,6 +905,32 @@ func (a *App) handleOperateWXData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.callWXApp(w, r, true, a.invokeOperateWXData)
+}
+
+func (a *App) handleCheckToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	ref := strings.TrimSpace(r.URL.Query().Get("ref"))
+	if ref == "" {
+		ref = strings.TrimSpace(r.URL.Query().Get("account_id"))
+	}
+	if ref == "" {
+		writeError(w, http.StatusBadRequest, "ref or account_id query param is required")
+		return
+	}
+	acc, ok := a.resolveAccountRef(w, r, ref)
+	if !ok {
+		return
+	}
+	status := a.refreshLiveness(r.Context(), acc)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"openid":   acc.OpenID,
+		"uin":      acc.UIN,
+		"nickname": acc.Nickname,
+		"status":   status,
+	})
 }
 
 func acceptWXAppRoute(w http.ResponseWriter, r *http.Request, path string) bool {
