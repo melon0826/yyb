@@ -53,6 +53,25 @@ CREATE TABLE IF NOT EXISTS features (
     description TEXT,
     enabled     INTEGER NOT NULL DEFAULT 1
 );
+
+CREATE TABLE IF NOT EXISTS proxies (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    url         TEXT    NOT NULL UNIQUE,
+    name        TEXT,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    action      TEXT    NOT NULL,
+    target      TEXT,
+    detail      TEXT,
+    client_ip   TEXT,
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
 `
 
 var defaultFeatures = []Feature{
@@ -114,6 +133,24 @@ type Feature struct {
 	Name        string  `json:"name"`
 	Description *string `json:"description"`
 	Enabled     bool    `json:"enabled"`
+}
+
+type Proxy struct {
+	ID        int64  `json:"id"`
+	URL       string `json:"url"`
+	Name      string `json:"name"`
+	Enabled   bool   `json:"enabled"`
+	CreatedAt int64  `json:"created_at"`
+	UpdatedAt int64  `json:"updated_at"`
+}
+
+type AuditLog struct {
+	ID        int64  `json:"id"`
+	Action    string `json:"action"`
+	Target    string `json:"target"`
+	Detail    string `json:"detail"`
+	ClientIP  string `json:"client_ip"`
+	CreatedAt int64  `json:"created_at"`
 }
 
 func Open(path string) (*DB, error) {
@@ -627,4 +664,135 @@ func isDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+func (db *DB) ListAliveAccounts(ctx context.Context) ([]*WechatAccount, error) {
+	rows, err := db.sql.QueryContext(ctx, selectAccountSQL+" WHERE status='alive' AND disabled=0 ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*WechatAccount
+	for rows.Next() {
+		acc, err := scanAccountRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, acc)
+	}
+	return out, rows.Err()
+}
+
+func (db *DB) AddProxy(ctx context.Context, url, name string) (*Proxy, error) {
+	now := time.Now().Unix()
+	res, err := db.sql.ExecContext(ctx,
+		"INSERT INTO proxies(url, name, created_at, updated_at) VALUES(?,?,?,?)",
+		url, nullableString(&name), now, now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	return db.GetProxy(ctx, id)
+}
+
+func (db *DB) GetProxy(ctx context.Context, id int64) (*Proxy, error) {
+	row := db.sql.QueryRowContext(ctx, "SELECT id, url, name, enabled, created_at, updated_at FROM proxies WHERE id=?", id)
+	return scanProxy(row)
+}
+
+func (db *DB) ListProxies(ctx context.Context) ([]*Proxy, error) {
+	rows, err := db.sql.QueryContext(ctx, "SELECT id, url, name, enabled, created_at, updated_at FROM proxies ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Proxy
+	for rows.Next() {
+		p, err := scanProxy(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (db *DB) UpdateProxy(ctx context.Context, id int64, url, name string, enabled bool) error {
+	v := 0
+	if enabled {
+		v = 1
+	}
+	now := time.Now().Unix()
+	_, err := db.sql.ExecContext(ctx,
+		"UPDATE proxies SET url=?, name=?, enabled=?, updated_at=? WHERE id=?",
+		url, nullableString(&name), v, now, id,
+	)
+	return err
+}
+
+func (db *DB) DeleteProxy(ctx context.Context, id int64) error {
+	_, err := db.sql.ExecContext(ctx, "DELETE FROM proxies WHERE id=?", id)
+	return err
+}
+
+func (db *DB) InsertAuditLog(ctx context.Context, action, target, detail, clientIP string) error {
+	now := time.Now().Unix()
+	_, err := db.sql.ExecContext(ctx,
+		"INSERT INTO audit_logs(action, target, detail, client_ip, created_at) VALUES(?,?,?,?,?)",
+		action, nullableString(&target), nullableString(&detail), nullableString(&clientIP), now,
+	)
+	return err
+}
+
+func (db *DB) ListAuditLogs(ctx context.Context, limit int) ([]*AuditLog, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := db.sql.QueryContext(ctx, "SELECT id, action, target, detail, client_ip, created_at FROM audit_logs ORDER BY id DESC LIMIT ?", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*AuditLog
+	for rows.Next() {
+		l, err := scanAuditLog(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+func scanProxy(row accountScanner) (*Proxy, error) {
+	var p Proxy
+	var name sql.NullString
+	var enabled int
+	if err := row.Scan(&p.ID, &p.URL, &name, &enabled, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		return nil, err
+	}
+	if name.Valid {
+		p.Name = name.String
+	}
+	p.Enabled = enabled != 0
+	return &p, nil
+}
+
+func scanAuditLog(row accountScanner) (*AuditLog, error) {
+	var l AuditLog
+	var target, detail, clientIP sql.NullString
+	if err := row.Scan(&l.ID, &l.Action, &target, &detail, &clientIP, &l.CreatedAt); err != nil {
+		return nil, err
+	}
+	if target.Valid {
+		l.Target = target.String
+	}
+	if detail.Valid {
+		l.Detail = detail.String
+	}
+	if clientIP.Valid {
+		l.ClientIP = clientIP.String
+	}
+	return &l, nil
 }

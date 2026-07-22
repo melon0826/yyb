@@ -51,6 +51,8 @@ func main() {
 	}
 	defer app.Close()
 
+	app.StartScheduler()
+
 	addr := fmt.Sprintf("%s:%d", *host, *port)
 	srv := &http.Server{
 		Addr:              addr,

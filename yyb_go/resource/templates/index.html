@@ -619,6 +619,84 @@
       display: none !important;
     }
 
+    .search-bar {
+      padding: 8px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .search-bar input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 8px 12px;
+      background: var(--bg);
+      color: var(--ink);
+      outline: none;
+    }
+
+    .search-bar input:focus {
+      border-color: var(--accent);
+    }
+
+    .batch-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface);
+      flex-wrap: wrap;
+    }
+
+    .batch-toolbar .btn {
+      font-size: 12px;
+      min-height: 30px;
+      padding: 4px 10px;
+    }
+
+    .proxy-panel {
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+    }
+
+    .proxy-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    .proxy-table th,
+    .proxy-table td {
+      padding: 8px 12px;
+      text-align: left;
+      border-bottom: 1px solid var(--line);
+      font-size: 13px;
+    }
+
+    .proxy-table th {
+      color: var(--muted);
+      font-weight: 680;
+      background: var(--surface);
+    }
+
+    .proxy-table .actions {
+      display: flex;
+      gap: 6px;
+    }
+
+    .proxy-table .btn-sm {
+      font-size: 11px;
+      min-height: 26px;
+      padding: 3px 8px;
+    }
+
+    .account-card-check {
+      position: absolute;
+      top: 6px;
+      right: 8px;
+      z-index: 2;
+    }
+
     @media (max-width: 1120px) {
       .overview,
       .work-grid {
@@ -735,12 +813,58 @@
             <p>点击账号后，下方调用面板会使用该账号</p>
           </div>
           <div class="panel-actions">
+            <button class="btn secondary" id="showProxyPanelBtn" type="button">代理池</button>
             <button class="btn secondary" id="reloadAccountsBtn" type="button">重新加载</button>
             <a class="btn primary" href="/scan">添加账号</a>
           </div>
         </div>
+        <div class="search-bar">
+          <input type="text" id="searchInput" placeholder="搜索账号 (昵称 / OpenID / UIN / 代理)" autocomplete="off">
+        </div>
+        <div class="batch-toolbar" id="batchToolbar">
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:12px;color:var(--muted)">
+            <input type="checkbox" id="selectAllCheckbox"> 全选 <span id="selectedCount">0</span>
+          </label>
+          <button class="btn secondary btn-sm" id="batchRefreshBtn" type="button">批量刷新</button>
+          <button class="btn secondary btn-sm" id="batchDisableBtn" type="button">批量禁用</button>
+          <button class="btn secondary btn-sm" id="batchEnableBtn" type="button">批量启用</button>
+        </div>
         <div class="account-strip" id="accountStrip">
           <div class="empty-state">账号加载中</div>
+        </div>
+      </section>
+
+      <section class="proxy-panel hidden" id="proxyPanel" aria-label="代理池管理">
+        <div class="section-head">
+          <div class="section-title">
+            <h3>代理池管理</h3>
+            <p>添加、启用或删除 HTTP/SOCKS5 代理</p>
+          </div>
+          <div class="panel-actions">
+            <button class="btn secondary" id="hideProxyPanelBtn" type="button">收起</button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="form-grid" style="grid-template-columns:1fr auto auto;align-items:end">
+            <div class="field">
+              <label for="proxyUrlInput">代理地址</label>
+              <input class="input" id="proxyUrlInput" placeholder="socks5://host:port" autocomplete="off">
+            </div>
+            <div class="field">
+              <label for="proxyNameInput">名称</label>
+              <input class="input" id="proxyNameInput" placeholder="可选" autocomplete="off" style="min-width:120px">
+            </div>
+            <button class="btn primary" id="addProxyBtn" type="button" style="height:42px">添加代理</button>
+          </div>
+          <table class="proxy-table" id="proxyTable">
+            <thead>
+              <tr><th>ID</th><th>地址</th><th>名称</th><th>状态</th><th>操作</th></tr>
+            </thead>
+            <tbody id="proxyTableBody">
+            </tbody>
+          </table>
+          <button class="btn secondary" id="testProxyBtn" type="button">测试所有可用代理</button>
+          <div class="log-line hidden" id="proxyTestResult"></div>
         </div>
       </section>
 
@@ -819,6 +943,14 @@
                 扫码页面
                 <span>添加新的微信账号</span>
               </a>
+              <a class="quick-link" href="#" id="proxyLink">
+                代理池
+                <span>管理 HTTP/SOCKS5 代理</span>
+              </a>
+              <a class="quick-link" href="#" id="auditLink">
+                审计日志
+                <span>查看操作记录</span>
+              </a>
             </div>
             <div class="log-line" id="activityLine">尚未执行操作</div>
           </div>
@@ -836,7 +968,8 @@
         { name: "operateWxData" }
       ],
       selectedOpenID: "",
-      lastResult: ""
+      lastResult: "",
+      selectedIDs: new Set()
     };
 
     const $ = id => document.getElementById(id);
@@ -933,11 +1066,28 @@
       syncSelectedAccount();
     }
 
+    function filterAccounts() {
+      const query = ($("searchInput").value || "").toLowerCase().trim();
+      document.querySelectorAll(".account-card").forEach(card => {
+        const text = (card.dataset.searchText || "").toLowerCase();
+        card.style.display = (!query || text.includes(query)) ? "" : "none";
+      });
+      updateSelectAllState();
+    }
+
+    function updateSelectAllState() {
+      const visible = [...document.querySelectorAll(".account-card")]
+        .filter(c => c.style.display !== "none");
+      const checked = visible.filter(c => c.querySelector(".account-card-check input:checked"));
+      $("selectedCount").textContent = checked.length ? `(${checked.length}个)` : "";
+    }
+
     function renderAccounts() {
       const strip = $("accountStrip");
       if (!state.accounts.length) {
-        strip.innerHTML = `<div class="empty-state">暂无账号，点击“添加账号”开始扫码。</div>`;
+        strip.innerHTML = `<div class="empty-state">暂无账号，点击"添加账号"开始扫码。</div>`;
         state.selectedOpenID = "";
+        state.selectedIDs.clear();
         renderStats();
         return;
       }
@@ -950,10 +1100,14 @@
       for (const account of state.accounts) {
         const name = accountName(account);
         const cls = statusClass(account.status);
+        const searchText = [name, account.openid || "", String(account.uin || ""), account.bound_proxy || ""].join(" ");
         const button = document.createElement("button");
         button.type = "button";
         button.className = "account-card";
+        button.style.position = "relative";
         button.dataset.openid = account.openid;
+        button.dataset.searchText = searchText;
+        button.dataset.id = account.id;
         button.innerHTML = `
           <span class="avatar">
             <img alt="" src="/accounts/avatar?ref=${encodeURIComponent(account.openid)}">
@@ -964,6 +1118,9 @@
             <span class="account-status ${cls}"><span class="status-dot"></span>${statusText(account.status)}</span>
             <span class="account-meta">uin: ${escapeHTML(account.uin ?? "-")} · ${formatChecked(account.last_checked_at)}</span>
             <span class="account-proxy">${account.bound_proxy ? "代理: " + escapeHTML(account.bound_proxy) : ""}</span>
+          </span>
+          <span class="account-card-check" onclick="event.stopPropagation()">
+            <input type="checkbox" data-id="${account.id}" onchange="onCardCheck(this)">
           </span>
         `;
         button.querySelector("img").addEventListener("error", event => {
@@ -977,7 +1134,50 @@
         });
         strip.appendChild(button);
       }
+      filterAccounts();
       renderStats();
+    }
+
+    function onCardCheck(cb) {
+      const id = parseInt(cb.dataset.id);
+      if (cb.checked) state.selectedIDs.add(id);
+      else state.selectedIDs.delete(id);
+      updateSelectAllState();
+    }
+
+    $("selectAllCheckbox").addEventListener("change", () => {
+      const checked = $("selectAllCheckbox").checked;
+      const visible = [...document.querySelectorAll(".account-card")]
+        .filter(c => c.style.display !== "none");
+      visible.forEach(c => {
+        const input = c.querySelector(".account-card-check input");
+        if (input) {
+          input.checked = checked;
+          const id = parseInt(input.dataset.id);
+          if (checked) state.selectedIDs.add(id);
+          else state.selectedIDs.delete(id);
+        }
+      });
+      updateSelectAllState();
+    });
+
+    $("searchInput").addEventListener("input", filterAccounts);
+
+    async function batchAction(action) {
+      const ids = [...state.selectedIDs];
+      if (!ids.length) {
+        setResult("请先选择需要操作的账号。", "缺少选择", true);
+        return;
+      }
+      try {
+        const result = await api("POST", "/accounts/batch", { ids, action });
+        setResult(result, `批量${action}完成`, false);
+        state.selectedIDs.clear();
+        $("selectAllCheckbox").checked = false;
+        await loadAccounts();
+      } catch (error) {
+        setResult(error.data || error.message, `批量${action}失败`, true);
+      }
     }
 
     function renderFeatures() {
@@ -1140,6 +1340,105 @@
       }
     }
 
+    // Proxy management
+    async function loadProxies() {
+      try {
+        const proxies = await api("GET", "/api/proxies");
+        const tbody = $("proxyTableBody");
+        tbody.innerHTML = proxies.map(p => `
+          <tr>
+            <td>${p.id}</td>
+            <td>${escapeHTML(p.url)}</td>
+            <td>${escapeHTML(p.name || "-")}</td>
+            <td style="color:${p.enabled ? 'var(--success)' : 'var(--danger)'}">${p.enabled ? "启用" : "禁用"}</td>
+            <td class="actions">
+              <button class="btn secondary btn-sm" onclick="toggleProxy(${p.id}, ${p.enabled})">${p.enabled ? "禁用" : "启用"}</button>
+              <button class="btn danger btn-sm" onclick="deleteProxy(${p.id})">删除</button>
+            </td>
+          </tr>
+        `).join("");
+      } catch (error) {
+        $("proxyTableBody").innerHTML = `<tr><td colspan="5" style="color:var(--danger)">加载失败</td></tr>`;
+      }
+    }
+
+    async function addProxy() {
+      const url = $("proxyUrlInput").value.trim();
+      const name = $("proxyNameInput").value.trim();
+      if (!url) return;
+      try {
+        await api("POST", "/api/proxies", { url, name });
+        $("proxyUrlInput").value = "";
+        $("proxyNameInput").value = "";
+        await loadProxies();
+        setActivity("代理已添加");
+      } catch (error) {
+        setResult(error.data || error.message, "添加代理失败", true);
+      }
+    }
+
+    async function toggleProxy(id, currentlyEnabled) {
+      try {
+        await api("PATCH", "/api/proxies", { id, enabled: !currentlyEnabled });
+        await loadProxies();
+      } catch (error) {
+        setResult(error.data || error.message, "更新代理失败", true);
+      }
+    }
+
+    async function deleteProxy(id) {
+      try {
+        await api("DELETE", `/api/proxies?id=${id}`);
+        await loadProxies();
+        setActivity(`代理 ${id} 已删除`);
+      } catch (error) {
+        setResult(error.data || error.message, "删除代理失败", true);
+      }
+    }
+
+    async function testProxies() {
+      const resultBox = $("proxyTestResult");
+      resultBox.classList.remove("hidden");
+      resultBox.textContent = "测试中...";
+      try {
+        const proxies = await api("GET", "/api/proxies");
+        const enabled = proxies.filter(p => p.enabled);
+        const results = [];
+        for (const p of enabled) {
+          try {
+            await api("GET", "/health");
+            results.push(`${p.url}: OK`);
+          } catch {
+            results.push(`${p.url}: FAIL`);
+          }
+        }
+        resultBox.textContent = results.join("\n") || "无可用代理";
+      } catch (error) {
+        resultBox.textContent = "获取代理列表失败";
+      }
+    }
+
+    function showProxyPanel() {
+      $("proxyPanel").classList.remove("hidden");
+      loadProxies();
+    }
+
+    function hideProxyPanel() {
+      $("proxyPanel").classList.add("hidden");
+    }
+
+    async function showAuditLogs() {
+      try {
+        const logs = await api("GET", "/api/audit-logs?limit=50");
+        const lines = logs.map(l =>
+          `[${new Date(l.created_at * 1000).toLocaleString("zh-CN")}] ${l.action} | ${l.target || "-"} | ${l.client_ip || ""}`
+        ).join("\n");
+        setResult(lines || "无审计记录", "审计日志 (最近50条)", false);
+      } catch (error) {
+        setResult(error.data || error.message, "加载审计日志失败", true);
+      }
+    }
+
     $("reloadAccountsBtn").addEventListener("click", loadAccounts);
     $("refreshAllBtn").addEventListener("click", refreshAll);
     $("resyncAllBtn").addEventListener("click", resyncAll);
@@ -1155,6 +1454,18 @@
         setActivity("复制失败，请手动选择结果内容");
       }
     });
+
+    $("batchRefreshBtn").addEventListener("click", () => batchAction("refresh"));
+    $("batchDisableBtn").addEventListener("click", () => batchAction("disable"));
+    $("batchEnableBtn").addEventListener("click", () => batchAction("enable"));
+
+    $("showProxyPanelBtn").addEventListener("click", showProxyPanel);
+    $("hideProxyPanelBtn").addEventListener("click", hideProxyPanel);
+    $("addProxyBtn").addEventListener("click", addProxy);
+    $("testProxyBtn").addEventListener("click", testProxies);
+
+    $("proxyLink").addEventListener("click", e => { e.preventDefault(); showProxyPanel(); });
+    $("auditLink").addEventListener("click", e => { e.preventDefault(); showAuditLogs(); });
 
     loadHealth();
     loadFeatures();

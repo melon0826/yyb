@@ -5,11 +5,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -150,6 +152,11 @@ func (a *App) Handler() http.Handler {
 	router.Any("/wx/qrcodeauth", gin.WrapF(a.handleWxQRCodeAuth))
 	router.Any("/wx/call/init", gin.WrapF(a.handleWxCallInit))
 	router.Any("/wx/cloud/call", gin.WrapF(a.handleWxCloudCall))
+	router.Any("/wx/appmsgext", gin.WrapF(a.handleWxAppMsgExt))
+	router.Any("/wx/appmsglike", gin.WrapF(a.handleWxAppMsgLike))
+	router.Any("/api/proxies", gin.WrapF(a.handleProxiesDispatcher))
+	router.Any("/api/audit-logs", gin.WrapF(a.handleListAuditLogs))
+	router.Any("/accounts/batch", gin.WrapF(a.handleAccountBatch))
 	router.NoRoute(func(c *gin.Context) {
 		writeError(c.Writer, http.StatusNotFound, "not found")
 	})
@@ -622,7 +629,7 @@ func (a *App) handleWxCodeCompat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"code": result["code"]})
 }
 
-// handleWxGetUserInfo 处理微信用户信息获取请求
+// handleWxGetUserInfo 处理微信用户信息获取请求 - 支持 encryptedData 解密
 // POST /wx/getuserinfo  body: { ref, app_id, encrypted_data, iv }
 func (a *App) handleWxGetUserInfo(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/wx/getuserinfo" {
@@ -667,8 +674,36 @@ func (a *App) handleWxGetUserInfo(w http.ResponseWriter, r *http.Request) {
 			resp["session_key"] = sk
 		}
 	}
-	// 兼容旧脚本：如果提供了 appid/app_id，返回 wx.login code
-	if body.AppID != "" {
+	if acc.Nickname != nil {
+		resp["nickname"] = *acc.Nickname
+	}
+	if acc.Avatar != nil {
+		resp["avatar"] = *acc.Avatar
+	}
+	if acc.UserInfo != nil {
+		resp["status"] = "full"
+		tryPut(&resp, acc.UserInfo, "nickname", "nick_name")
+		tryPut(&resp, acc.UserInfo, "avatar", "head_img_url")
+	}
+	// 如果提供了 encryptedData+iv+appID，通过 iLink 解密
+	if body.AppID != "" && acc.LoginBuffer != "" && body.EncryptedData != "" && body.IV != "" {
+		effectiveProxy := resolveEffectiveProxy(acc.BoundProxy, a.cfg.TCPProxy)
+		decryptPayload := map[string]any{
+			"api_name":        "getuserinfo",
+			"encrypted_data":  body.EncryptedData,
+			"iv":              body.IV,
+		}
+		result, err := a.invokeWXApp(r.Context(), acc, body.AppID, effectiveProxy, decryptPayload, func(ctx context.Context, acc *store.WechatAccount, appID string, proxy string, p map[string]any) (map[string]any, error) {
+			return a.pool.OperateWXData(ctx, acc.LoginBuffer, appID, decryptPayload, acc.ID, proxy)
+		})
+		if err == nil && result != nil {
+			tryPut(&resp, result, "nickname", "nickName", "nick_name")
+			tryPut(&resp, result, "avatar", "avatarUrl", "head_img_url")
+			if resp["nickname"] != nil || resp["avatar"] != nil {
+				resp["status"] = "decrypted"
+			}
+		}
+	} else if body.AppID != "" {
 		effectiveProxy := resolveEffectiveProxy(acc.BoundProxy, a.cfg.TCPProxy)
 		result, err := a.invokeWXApp(r.Context(), acc, body.AppID, effectiveProxy, nil, func(ctx context.Context, acc *store.WechatAccount, appID string, proxy string, _ map[string]any) (map[string]any, error) {
 			return a.pool.GetCode(ctx, acc.LoginBuffer, appID, acc.ID, proxy)
@@ -718,8 +753,8 @@ func (a *App) handleWxEncryptKey(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleWxOAuth 处理微信 OAuth 回调
-// POST /wx/oauth  body: { code, state, ref }
+// handleWxOAuth 处理微信 OAuth 回调 - 通过 iLink 真实执行 code2Session
+// POST /wx/oauth  body: { code, state, ref, appid }
 func (a *App) handleWxOAuth(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/wx/oauth" {
 		writeError(w, http.StatusNotFound, "not found")
@@ -730,9 +765,11 @@ func (a *App) handleWxOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Code  string `json:"code"`
-		State string `json:"state"`
-		Ref   string `json:"ref"`
+		Code   string `json:"code"`
+		State  string `json:"state"`
+		Ref    string `json:"ref"`
+		AppID  string `json:"appid"`
+		OpenID string `json:"openid"`
 	}
 	if err := decodeOptionalJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -742,8 +779,49 @@ func (a *App) handleWxOAuth(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "code is required")
 		return
 	}
+	if body.Ref == "" {
+		body.Ref = body.OpenID
+	}
+	if body.AppID == "" {
+		body.AppID = body.Ref
+	}
+	if body.State == "" {
+		body.State = fmt.Sprintf("oauth_%d", time.Now().UnixNano())
+	}
 	acc, ok := a.resolveAccountRef(w, r, body.Ref)
 	if !ok {
+		return
+	}
+	effectiveProxy := resolveEffectiveProxy(acc.BoundProxy, a.cfg.TCPProxy)
+	var appID string
+	if body.AppID != "" && body.AppID != acc.OpenID {
+		appID = body.AppID
+	}
+	if appID != "" && acc.LoginBuffer != "" {
+		oauthPayload := map[string]any{
+			"api_name": "code2Session",
+			"data":     map[string]any{"code": body.Code},
+		}
+		result, err := a.invokeWXApp(r.Context(), acc, appID, effectiveProxy, oauthPayload, func(ctx context.Context, acc *store.WechatAccount, appID string, proxy string, p map[string]any) (map[string]any, error) {
+			return a.pool.OperateWXData(ctx, acc.LoginBuffer, appID, oauthPayload, acc.ID, proxy)
+		})
+		if err != nil {
+			var expired accountExpiredError
+			if errors.As(err, &expired) {
+				writeError(w, http.StatusConflict, "account login_buffer expired; re-scan required")
+			} else {
+				writeError(w, http.StatusBadGateway, "oauth failed: "+err.Error())
+			}
+			return
+		}
+		a.db.InsertAuditLog(r.Context(), "oauth", acc.OpenID, appID, r.RemoteAddr)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"openid": acc.OpenID,
+			"appid":  appID,
+			"state":  body.State,
+			"status": "ok",
+			"result": result,
+		})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -801,7 +879,7 @@ func (a *App) handleWxAutoOAuth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleWxHeart 心跳保活
+// handleWxHeart 心跳保活 - 检查账号活跃度并返回状态
 // POST /wx/heart  body: { ref }
 func (a *App) handleWxHeart(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/wx/heart" {
@@ -813,17 +891,36 @@ func (a *App) handleWxHeart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Ref string `json:"ref"`
+		Ref    string `json:"ref"`
+		OpenID string `json:"openid"`
 	}
 	_ = decodeOptionalJSON(r, &body)
+	if body.Ref == "" {
+		body.Ref = body.OpenID
+	}
+	status := "ok"
+	lastChecked := int64(0)
+	if body.Ref != "" {
+		acc, ok := a.resolveAccountRef(w, r, body.Ref)
+		if !ok {
+			return
+		}
+		status = a.refreshLiveness(r.Context(), acc)
+		acc, err := a.db.GetAccount(r.Context(), acc.ID)
+		if err == nil && acc.LastCheckedAt != nil {
+			lastChecked = *acc.LastCheckedAt
+		}
+	}
+	a.db.InsertAuditLog(r.Context(), "heart", body.Ref, "", r.RemoteAddr)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":    "ok",
-		"timestamp": time.Now().Unix(),
+		"status":       status,
+		"timestamp":    time.Now().Unix(),
+		"last_checked": lastChecked,
 	})
 }
 
-// handleWxQRCodeAuth 处理二维码认证回调
-// POST /wx/qrcodeauth  body: { data, ref } 或兼容格式 { openid, uuid }
+// handleWxQRCodeAuth 处理二维码认证回调 - 真实扫描 scene，匹配本地账号
+// POST /wx/qrcodeauth  body: { data, ref } 或兼容格式 { openid, uuid, scene }
 func (a *App) handleWxQRCodeAuth(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/wx/qrcodeauth" {
 		writeError(w, http.StatusNotFound, "not found")
@@ -838,6 +935,7 @@ func (a *App) handleWxQRCodeAuth(w http.ResponseWriter, r *http.Request) {
 		Ref    string `json:"ref"`
 		OpenID string `json:"openid"`
 		UUID   string `json:"uuid"`
+		Scene  string `json:"scene"`
 	}
 	if err := decodeOptionalJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -852,64 +950,48 @@ func (a *App) handleWxQRCodeAuth(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Data == "" {
 		body.Data = body.UUID
+		if body.Data == "" {
+			body.Data = body.Scene
+		}
+	}
+	ctx := r.Context()
+	if body.OpenID != "" {
+		accounts, err := a.db.ListAccounts(ctx)
+		if err == nil {
+			for _, acc := range accounts {
+				if acc.OpenID == body.OpenID {
+					a.db.InsertAuditLog(ctx, "qrcodeauth_match", acc.OpenID, body.Data, r.RemoteAddr)
+					writeJSON(w, http.StatusOK, map[string]any{
+						"status":   "found",
+						"scene":    body.Data,
+						"openid":   acc.OpenID,
+						"nickname": acc.Nickname,
+						"avatar":   acc.Avatar,
+					})
+					return
+				}
+			}
+		}
+		a.db.InsertAuditLog(ctx, "qrcodeauth_notfound", body.OpenID, body.Data, r.RemoteAddr)
+		writeJSON(w, http.StatusOK, map[string]any{"status": "not_found", "scene": body.Data, "openid": body.OpenID})
+		return
 	}
 	acc, ok := a.resolveAccountRef(w, r, body.Ref)
 	if !ok {
 		return
 	}
+	a.db.InsertAuditLog(ctx, "qrcodeauth", acc.OpenID, body.Data, r.RemoteAddr)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"openid": acc.OpenID,
-		"uuid":   body.Data,
-		"status": "received",
+		"openid":   acc.OpenID,
+		"nickname": acc.Nickname,
+		"uuid":     body.Data,
+		"status":   "received",
 	})
 }
 
-// handleWxCallInit 小程序云函数初始化（触发静默注册）
+// handleWxCallInit 小程序云函数初始化（触发静默注册，确保session存在）
 // POST /wx/call/init  body: { appid, openid }
 func (a *App) handleWxCallInit(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	var body struct {
-		AppID  string `json:"appid"`
-		OpenID string `json:"openid"`
-	}
-	if err := decodeOptionalJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-		return
-	}
-	if body.OpenID == "" {
-		writeError(w, http.StatusBadRequest, "openid is required")
-		return
-	}
-	if body.AppID == "" {
-		writeError(w, http.StatusBadRequest, "appid is required")
-		return
-	}
-	acc, ok := a.resolveAccountRef(w, r, body.OpenID)
-	if !ok {
-		return
-	}
-	effectiveProxy := resolveEffectiveProxy(acc.BoundProxy, a.cfg.TCPProxy)
-	_, err := a.invokeWXApp(r.Context(), acc, body.AppID, effectiveProxy, nil, func(ctx context.Context, acc *store.WechatAccount, appID string, proxy string, _ map[string]any) (map[string]any, error) {
-		return a.pool.GetCode(ctx, acc.LoginBuffer, appID, acc.ID, proxy)
-	})
-	if err != nil {
-		var expired accountExpiredError
-		if errors.As(err, &expired) {
-			writeError(w, http.StatusConflict, "account login_buffer expired; re-scan required")
-		} else {
-			writeError(w, http.StatusBadGateway, "init failed: "+err.Error())
-		}
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"openid": acc.OpenID, "appid": body.AppID, "status": "initialized"})
-}
-
-// handleWxCloudCall 小程序云函数调用
-// POST /wx/cloud/call  body: { appid, openid }
-func (a *App) handleWxCloudCall(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -943,10 +1025,69 @@ func (a *App) handleWxCloudCall(w http.ResponseWriter, r *http.Request) {
 		if errors.As(err, &expired) {
 			writeError(w, http.StatusConflict, "account login_buffer expired; re-scan required")
 		} else {
+			writeError(w, http.StatusBadGateway, "init failed: "+err.Error())
+		}
+		return
+	}
+	a.db.InsertAuditLog(r.Context(), "wx_call_init", acc.OpenID, body.AppID, r.RemoteAddr)
+	writeJSON(w, http.StatusOK, map[string]any{"openid": acc.OpenID, "appid": body.AppID, "status": "initialized", "result": result})
+}
+
+// handleWxCloudCall 小程序云函数调用
+// POST /wx/cloud/call  body: { appid, openid, api_name, data }
+func (a *App) handleWxCloudCall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		AppID   string `json:"appid"`
+		OpenID  string `json:"openid"`
+		APIName string `json:"api_name"`
+		Data    string `json:"data"`
+	}
+	if err := decodeOptionalJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.OpenID == "" {
+		writeError(w, http.StatusBadRequest, "openid is required")
+		return
+	}
+	if body.AppID == "" {
+		writeError(w, http.StatusBadRequest, "appid is required")
+		return
+	}
+	acc, ok := a.resolveAccountRef(w, r, body.OpenID)
+	if !ok {
+		return
+	}
+	payload := map[string]any{}
+	if body.APIName != "" {
+		payload["api_name"] = body.APIName
+	}
+	if body.Data != "" {
+		var parsed any
+		if err := json.Unmarshal([]byte(body.Data), &parsed); err == nil {
+			payload["data"] = parsed
+		} else {
+			payload["data"] = body.Data
+		}
+	}
+	effectiveProxy := resolveEffectiveProxy(acc.BoundProxy, a.cfg.TCPProxy)
+	result, err := a.invokeWXApp(r.Context(), acc, body.AppID, effectiveProxy, payload, func(ctx context.Context, acc *store.WechatAccount, appID string, proxy string, p map[string]any) (map[string]any, error) {
+		return a.pool.OperateWXData(ctx, acc.LoginBuffer, appID, payload, acc.ID, proxy)
+	})
+	if err != nil {
+		var expired accountExpiredError
+		if errors.As(err, &expired) {
+			writeError(w, http.StatusConflict, "account login_buffer expired; re-scan required")
+		} else {
 			writeError(w, http.StatusBadGateway, "cloud call failed: "+err.Error())
 		}
 		return
 	}
+	a.db.InsertAuditLog(r.Context(), "wx_cloud_call", acc.OpenID, body.AppID, r.RemoteAddr)
 	writeJSON(w, http.StatusOK, map[string]any{"openid": acc.OpenID, "appid": body.AppID, "result": result})
 }
 
@@ -1465,4 +1606,291 @@ func sortedKeys[M ~map[string]V, V any](m M) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func tryPut(dst *map[string]any, src map[string]any, keys ...string) {
+	if src == nil {
+		return
+	}
+	for _, k := range keys {
+		if v, ok := src[k]; ok && v != nil {
+			s, isStr := v.(string)
+			if isStr && s != "" {
+				(*dst)[keys[0]] = s
+				return
+			}
+		}
+	}
+}
+
+// handleWxAppMsgExt 处理小程序消息扩展
+// POST /wx/appmsgext  body: { ref, app_id, payload }
+func (a *App) handleWxAppMsgExt(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/wx/appmsgext" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		Ref     string         `json:"ref"`
+		AppID   string         `json:"app_id"`
+		Payload map[string]any `json:"payload"`
+	}
+	if err := decodeOptionalJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.Ref == "" || body.AppID == "" {
+		writeError(w, http.StatusBadRequest, "ref and app_id are required")
+		return
+	}
+	acc, ok := a.resolveAccountRef(w, r, body.Ref)
+	if !ok {
+		return
+	}
+	effectiveProxy := resolveEffectiveProxy(acc.BoundProxy, a.cfg.TCPProxy)
+	result, err := a.invokeWXApp(r.Context(), acc, body.AppID, effectiveProxy, body.Payload, a.invokeOperateWXData)
+	if err != nil {
+		var expired accountExpiredError
+		if errors.As(err, &expired) {
+			writeError(w, http.StatusConflict, "account login_buffer expired; re-scan required")
+		} else {
+			writeError(w, http.StatusBadGateway, "appmsgext failed: "+err.Error())
+		}
+		return
+	}
+	a.db.InsertAuditLog(r.Context(), "appmsgext", acc.OpenID, body.AppID, r.RemoteAddr)
+	writeJSON(w, http.StatusOK, map[string]any{"openid": acc.OpenID, "app_id": body.AppID, "result": result})
+}
+
+// handleWxAppMsgLike 处理小程序消息点赞
+// POST /wx/appmsglike  body: { ref, app_id, payload }
+func (a *App) handleWxAppMsgLike(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/wx/appmsglike" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		Ref     string         `json:"ref"`
+		AppID   string         `json:"app_id"`
+		Payload map[string]any `json:"payload"`
+	}
+	if err := decodeOptionalJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.Ref == "" || body.AppID == "" {
+		writeError(w, http.StatusBadRequest, "ref and app_id are required")
+		return
+	}
+	acc, ok := a.resolveAccountRef(w, r, body.Ref)
+	if !ok {
+		return
+	}
+	effectiveProxy := resolveEffectiveProxy(acc.BoundProxy, a.cfg.TCPProxy)
+	result, err := a.invokeWXApp(r.Context(), acc, body.AppID, effectiveProxy, body.Payload, a.invokeOperateWXData)
+	if err != nil {
+		var expired accountExpiredError
+		if errors.As(err, &expired) {
+			writeError(w, http.StatusConflict, "account login_buffer expired; re-scan required")
+		} else {
+			writeError(w, http.StatusBadGateway, "appmsglike failed: "+err.Error())
+		}
+		return
+	}
+	a.db.InsertAuditLog(r.Context(), "appmsglike", acc.OpenID, body.AppID, r.RemoteAddr)
+	writeJSON(w, http.StatusOK, map[string]any{"openid": acc.OpenID, "app_id": body.AppID, "result": result})
+}
+
+// handleProxiesDispatcher 代理池管理路由分发
+func (a *App) handleProxiesDispatcher(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		a.handleListProxies(w, r)
+	case http.MethodPost:
+		a.handleAddProxy(w, r)
+	case http.MethodPatch:
+		a.handleUpdateProxy(w, r)
+	case http.MethodDelete:
+		a.handleDeleteProxy(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// handleListProxies GET /api/proxies
+func (a *App) handleListProxies(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	proxies, err := a.db.ListProxies(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "list proxies: "+err.Error())
+		return
+	}
+	if proxies == nil {
+		proxies = []*store.Proxy{}
+	}
+	writeJSON(w, http.StatusOK, proxies)
+}
+
+// handleAddProxy POST /api/proxies  body: { url, name }
+func (a *App) handleAddProxy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		URL  string `json:"url"`
+		Name string `json:"name"`
+	}
+	if err := decodeOptionalJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.URL == "" {
+		writeError(w, http.StatusBadRequest, "url is required")
+		return
+	}
+	proxy, err := a.db.AddProxy(r.Context(), body.URL, body.Name)
+	if err != nil {
+		writeError(w, http.StatusConflict, "add proxy: "+err.Error())
+		return
+	}
+	a.db.InsertAuditLog(r.Context(), "add_proxy", body.URL, "", r.RemoteAddr)
+	writeJSON(w, http.StatusOK, proxy)
+}
+
+// handleUpdateProxy PATCH /api/proxies  body: { id, url, name, enabled }
+func (a *App) handleUpdateProxy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch && r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		ID      int64  `json:"id"`
+		URL     string `json:"url"`
+		Name    string `json:"name"`
+		Enabled *bool  `json:"enabled"`
+	}
+	if err := decodeOptionalJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.ID == 0 {
+		writeError(w, http.StatusBadRequest, "id is required")
+		return
+	}
+	enabled := true
+	if body.Enabled != nil {
+		enabled = *body.Enabled
+	}
+	if err := a.db.UpdateProxy(r.Context(), body.ID, body.URL, body.Name, enabled); err != nil {
+		writeError(w, http.StatusBadRequest, "update proxy: "+err.Error())
+		return
+	}
+	a.db.InsertAuditLog(r.Context(), "update_proxy", fmt.Sprintf("id=%d", body.ID), "", r.RemoteAddr)
+	proxy, _ := a.db.GetProxy(r.Context(), body.ID)
+	writeJSON(w, http.StatusOK, proxy)
+}
+
+// handleDeleteProxy DELETE /api/proxies?id=1
+func (a *App) handleDeleteProxy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	idStr := r.URL.Query().Get("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, http.StatusBadRequest, "valid id query param is required")
+		return
+	}
+	if err := a.db.DeleteProxy(r.Context(), id); err != nil {
+		writeError(w, http.StatusInternalServerError, "delete proxy: "+err.Error())
+		return
+	}
+	a.db.InsertAuditLog(r.Context(), "delete_proxy", fmt.Sprintf("id=%d", id), "", r.RemoteAddr)
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": id})
+}
+
+// handleListAuditLogs GET /api/audit-logs?limit=100
+func (a *App) handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	limit := 100
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
+		limit = n
+	}
+	logs, err := a.db.ListAuditLogs(r.Context(), limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "list audit logs: "+err.Error())
+		return
+	}
+	if logs == nil {
+		logs = []*store.AuditLog{}
+	}
+	writeJSON(w, http.StatusOK, logs)
+}
+
+// handleAccountBatch 批量操作账号
+// POST /accounts/batch  body: { ids: [...], action: "refresh"|"resync"|"disable"|"enable" }
+func (a *App) handleAccountBatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		IDs    []int64 `json:"ids"`
+		Action string  `json:"action"`
+	}
+	if err := decodeOptionalJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if len(body.IDs) == 0 || body.Action == "" {
+		writeError(w, http.StatusBadRequest, "ids and action are required")
+		return
+	}
+	results := make([]map[string]any, 0, len(body.IDs))
+	for _, id := range body.IDs {
+		acc, err := a.db.GetAccount(r.Context(), id)
+		if err != nil {
+			results = append(results, map[string]any{"id": id, "status": "error", "error": err.Error()})
+			continue
+		}
+		switch body.Action {
+		case "refresh":
+			status := a.refreshLiveness(r.Context(), acc)
+			results = append(results, map[string]any{"id": id, "openid": acc.OpenID, "status": status})
+		case "resync":
+			updated, err := a.resyncProfile(r.Context(), acc)
+			if err != nil {
+				results = append(results, map[string]any{"id": id, "openid": acc.OpenID, "status": "error", "error": err.Error()})
+			} else {
+				results = append(results, map[string]any{"id": id, "openid": updated.OpenID, "status": "synced"})
+			}
+		case "disable":
+			_ = a.db.SetAccountDisabled(r.Context(), id, true)
+			results = append(results, map[string]any{"id": id, "openid": acc.OpenID, "status": "disabled"})
+		case "enable":
+			_ = a.db.SetAccountDisabled(r.Context(), id, false)
+			results = append(results, map[string]any{"id": id, "openid": acc.OpenID, "status": "enabled"})
+		default:
+			writeError(w, http.StatusBadRequest, "unknown action: "+body.Action)
+			return
+		}
+	}
+	a.db.InsertAuditLog(r.Context(), "batch_"+body.Action, fmt.Sprintf("ids=%v", body.IDs), "", r.RemoteAddr)
+	writeJSON(w, http.StatusOK, results)
 }
