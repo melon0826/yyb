@@ -683,6 +683,24 @@ func (db *DB) ListAliveAccounts(ctx context.Context) ([]*WechatAccount, error) {
 	return out, rows.Err()
 }
 
+func (db *DB) ListRecentlyExpired(ctx context.Context, maxAge time.Duration) ([]*WechatAccount, error) {
+	cutoff := time.Now().Add(-maxAge).Unix()
+	rows, err := db.sql.QueryContext(ctx, selectAccountSQL+" WHERE status!='alive' AND disabled=0 AND last_checked_at>=? ORDER BY last_checked_at DESC", cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*WechatAccount
+	for rows.Next() {
+		acc, err := scanAccountRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, acc)
+	}
+	return out, rows.Err()
+}
+
 func (db *DB) AddProxy(ctx context.Context, url, name string) (*Proxy, error) {
 	now := time.Now().Unix()
 	res, err := db.sql.ExecContext(ctx,

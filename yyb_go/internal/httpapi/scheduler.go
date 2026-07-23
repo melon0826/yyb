@@ -11,6 +11,7 @@ import (
 const (
 	renewInterval   = 25 * time.Minute
 	renewMaxRetries = 3
+	expiredRetry    = 60 * time.Minute // 过期后1小时内仍尝试复活
 )
 
 func (a *App) StartScheduler() {
@@ -35,12 +36,18 @@ func (a *App) runRenew() {
 		log.Printf("[scheduler] list alive accounts: %v", err)
 		return
 	}
-	if len(accounts) == 0 {
-		return
+
+	// 同时拉取最近过期的账号，尝试复活
+	expiredAccounts, expiredErr := a.db.ListRecentlyExpired(ctx, expiredRetry)
+	if expiredErr != nil {
+		log.Printf("[scheduler] list expired accounts: %v", expiredErr)
 	}
 
 	renewed := 0
 	failed := 0
+	revived := 0
+
+	// 续期存活的账号
 	for _, acc := range accounts {
 		status := a.renewAccount(ctx, acc)
 		if status == "alive" {
@@ -49,9 +56,23 @@ func (a *App) runRenew() {
 			failed++
 		}
 	}
-	if renewed+failed > 0 {
-		log.Printf("[scheduler] renewed %d/%d alive accounts (%d failed)",
-			renewed, len(accounts), failed)
+
+	// 尝试复活最近过期的账号
+	for _, acc := range expiredAccounts {
+		status := a.renewAccount(ctx, acc)
+		if status == "alive" {
+			revived++
+		}
+	}
+
+	total := len(accounts)
+	if total > 0 {
+		log.Printf("[scheduler] renewed %d/%d alive (%d failed)",
+			renewed, total, failed)
+	}
+	if len(expiredAccounts) > 0 {
+		log.Printf("[scheduler] revived %d/%d recently-expired accounts",
+			revived, len(expiredAccounts))
 	}
 }
 

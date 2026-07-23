@@ -711,6 +711,27 @@ func (a *App) handleWxGetUserInfo(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			resp["code"] = result["code"]
 		}
+		// ctrip/iqoo/haitian/fuyouhui/yichengtong 等脚本需要 encryptedData+iv
+		// 通过 OperateWXData 的 getUserInfo 获取
+		if acc.LoginBuffer != "" {
+			getInfoPayload := map[string]any{
+				"api_name": "getUserInfo",
+				"data":     map[string]any{},
+			}
+			infoResult, err := a.invokeWXApp(r.Context(), acc, body.AppID, effectiveProxy, getInfoPayload, func(ctx context.Context, acc *store.WechatAccount, appID string, proxy string, p map[string]any) (map[string]any, error) {
+				return a.pool.OperateWXData(ctx, acc.LoginBuffer, appID, getInfoPayload, acc.ID, proxy)
+			})
+			if err == nil && infoResult != nil {
+				if ed, ok := infoResult["encryptedData"]; ok {
+					resp["encryptedData"] = ed
+				}
+				if iv, ok := infoResult["iv"]; ok {
+					resp["iv"] = iv
+				}
+				tryPut(&resp, infoResult, "nickname", "nickName", "nick_name")
+				tryPut(&resp, infoResult, "avatar", "avatarUrl", "head_img_url")
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
