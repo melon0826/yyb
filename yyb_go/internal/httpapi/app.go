@@ -141,6 +141,7 @@ func (a *App) Handler() http.Handler {
 	router.Any("/accounts/status", gin.WrapF(a.handleAccountStatus))
 	router.Any("/wxapp/getCode", gin.WrapF(a.handleGetCode))
 	router.Any("/wxapp/getPhoneNumber", gin.WrapF(a.handleGetPhoneNumber))
+	router.Any("/wx/getphonenumber", gin.WrapF(a.handleWxGetPhoneNumber))
 	router.Any("/wxapp/operateWxData", gin.WrapF(a.handleOperateWXData))
 	router.Any("/wxapp/checktoken", gin.WrapF(a.handleCheckToken))
 	router.Any("/wx/code", gin.WrapF(a.handleWxCodeCompat))
@@ -1178,6 +1179,45 @@ func (a *App) handleGetPhoneNumber(w http.ResponseWriter, r *http.Request) {
 	a.callWXApp(w, r, false, a.invokeGetPhoneNumber)
 }
 
+func (a *App) handleWxGetPhoneNumber(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		AppID  string `json:"appid"`
+		OpenID string `json:"openid"`
+	}
+	if err := decodeOptionalJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.OpenID == "" {
+		writeError(w, http.StatusBadRequest, "openid is required")
+		return
+	}
+	if body.AppID == "" {
+		writeError(w, http.StatusBadRequest, "appid is required")
+		return
+	}
+	acc, ok := a.resolveAccountRef(w, r, body.OpenID)
+	if !ok {
+		return
+	}
+	effectiveProxy := resolveEffectiveProxy(acc.BoundProxy, a.cfg.TCPProxy)
+	result, err := a.invokeWXApp(r.Context(), acc, body.AppID, effectiveProxy, nil, a.invokeGetPhoneNumber)
+	if err != nil {
+		var expired accountExpiredError
+		if errors.As(err, &expired) {
+			writeError(w, http.StatusConflict, "account login_buffer expired; re-scan required")
+		} else {
+			writeError(w, http.StatusBadGateway, "get phone number failed: "+err.Error())
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (a *App) handleOperateWXData(w http.ResponseWriter, r *http.Request) {
 	if !acceptWXAppRoute(w, r, "/wxapp/operateWxData") {
 		return
@@ -1538,16 +1578,18 @@ func terminalQR(status string) bool {
 }
 
 type apiEnvelope struct {
-	Code int    `json:"code"`
-	Msg  string `json:"msg"`
-	Data any    `json:"data"`
+	Status bool   `json:"status"`
+	Code   int    `json:"code"`
+	Msg    string `json:"msg"`
+	Data   any    `json:"data"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	writeRawJSON(w, status, apiEnvelope{
-		Code: 0,
-		Msg:  "success",
-		Data: v,
+		Status: true,
+		Code:   0,
+		Msg:    "success",
+		Data:   v,
 	})
 }
 
@@ -1561,9 +1603,10 @@ func writeRawJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, detail string) {
 	writeRawJSON(w, status, apiEnvelope{
-		Code: status,
-		Msg:  detail,
-		Data: nil,
+		Status: false,
+		Code:   status,
+		Msg:    detail,
+		Data:   nil,
 	})
 }
 
