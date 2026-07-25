@@ -53,6 +53,8 @@ var swaggerDocsHandler = httpSwagger.Handler(
 	httpSwagger.DefaultModelsExpandDepth(httpSwagger.ShowModel),
 )
 
+var guard *authGuard
+
 func NewApp(cfg Config) (*App, error) {
 	if cfg.ResourceRoot == "" {
 		cfg.ResourceRoot = filepath.Join(".", "resource")
@@ -114,7 +116,7 @@ func (a *App) Handler() http.Handler {
 	router := gin.New()
 	router.Use(gin.Logger(), gin.Recovery())
 
-	guard := newAuthGuard()
+	guard = newAuthGuard()
 	router.Use(guard.middleware())
 
 	router.Any("/", gin.WrapF(a.handleIndex))
@@ -127,6 +129,7 @@ func (a *App) Handler() http.Handler {
 	router.Any("/health", func(c *gin.Context) {
 		writeJSON(c.Writer, http.StatusOK, gin.H{"ok": true})
 	})
+	router.Any("/api/auth/validate", gin.WrapF(a.handleAuthValidate))
 	router.Any("/api/dashboard", gin.WrapF(a.handleDashboard))
 	router.StaticFS("/static", http.Dir(a.resources.Static))
 	router.Any("/qr", gin.WrapF(a.handleQRRoot))
@@ -1111,6 +1114,33 @@ func (a *App) handleWxCloudCall(w http.ResponseWriter, r *http.Request) {
 	}
 	a.db.InsertAuditLog(r.Context(), "wx_cloud_call", acc.OpenID, body.AppID, r.RemoteAddr)
 	writeJSON(w, http.StatusOK, map[string]any{"openid": acc.OpenID, "appid": body.AppID, "result": result})
+}
+
+// handleAuthValidate 验证 API 认证 token
+// GET /api/auth/validate
+// Header: auth=<token>
+// Response: {"status": true, "message": "验证通过"}
+func (a *App) handleAuthValidate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	token := strings.TrimSpace(r.Header.Get("auth"))
+	if token == "" {
+		token = strings.TrimSpace(r.Header.Get("Authorization"))
+		token = strings.TrimPrefix(token, "Bearer ")
+	}
+	if !guard.validateAPIAuth(token) {
+		writeRawJSON(w, http.StatusUnauthorized, gin.H{
+			"status":  false,
+			"message": "invalid api auth",
+		})
+		return
+	}
+	writeRawJSON(w, http.StatusOK, gin.H{
+		"status":  true,
+		"message": "验证通过",
+	})
 }
 
 // handleDashboard 返回账号概览

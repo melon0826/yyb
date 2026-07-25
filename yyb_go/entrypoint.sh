@@ -1,5 +1,5 @@
 #!/bin/sh
 exec ./yyb-go \
   --host 0.0.0.0 \
-  --port "${YYB_PORT:-8000}" \
+  --port "${YYB_PORT:-8181}" \
   --resource-root ./resource

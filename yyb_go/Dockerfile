@@ -19,5 +19,5 @@ COPY resource/ ./resource/
 COPY entrypoint.sh /
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 8000
+EXPOSE 8181
 ENTRYPOINT ["/entrypoint.sh"]

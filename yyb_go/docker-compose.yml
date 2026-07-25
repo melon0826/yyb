@@ -6,8 +6,6 @@ services:
     ports:
       - "8181:8181"
     environment:
-      - YYB_USERNAME=melon0826
-      - YYB_PASSWORD=826523lgho
       - YYB_PORT=8181
     volumes:
       - yyb-data:/app/resource/db
